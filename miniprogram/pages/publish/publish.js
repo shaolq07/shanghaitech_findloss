@@ -2,6 +2,8 @@ const { CATEGORIES } = require('../../utils/constants');
 const { createItem, searchLocations, classifyByText } = require('../../utils/store');
 const { findNearbyLocations, findNearestLocation } = require('../../utils/locations');
 
+const HTTP_CLASSIFIER_URL = 'https://skd-d2gvbeo5c6227bf73-1448678733.ap-shanghai.app.tcloudbase.com/lostfound-api';
+
 function initialForm() {
   return {
     type: 'found',
@@ -48,6 +50,23 @@ function buildStageError(stage, error) {
   return new Error(`${stage}失败：${getCloudErrorMessage(error)}`);
 }
 
+function shouldUseHttpClassifier(error) {
+  const message = getCloudErrorMessage(error, '');
+  return /-601034|没有权限|云开发|云托管|uploadFile:fail/i.test(message);
+}
+
+function compressImageForRecognition(filePath) {
+  if (!wx.compressImage) return Promise.resolve(filePath);
+  return new Promise((resolve) => {
+    wx.compressImage({
+      src: filePath,
+      quality: 60,
+      success: (res) => resolve(res.tempFilePath || filePath),
+      fail: () => resolve(filePath)
+    });
+  });
+}
+
 function uploadImageForRecognition(filePath) {
   const cloudPath = `lostfound/${Date.now()}-${Math.random().toString(16).slice(2, 8)}.${getFileExtension(filePath)}`;
   return new Promise((resolve, reject) => {
@@ -58,6 +77,37 @@ function uploadImageForRecognition(filePath) {
       fail: (error) => reject(buildStageError('图片上传', error))
     });
   });
+}
+
+function callHttpImageClassifier(filePath, hint) {
+  return compressImageForRecognition(filePath).then((compressedPath) => new Promise((resolve, reject) => {
+    wx.uploadFile({
+      url: HTTP_CLASSIFIER_URL,
+      filePath: compressedPath,
+      name: 'file',
+      formData: {
+        action: 'classifyImage',
+        hint
+      },
+      success: (res) => {
+        let data = res.data;
+        if (typeof data === 'string') {
+          try {
+            data = JSON.parse(data);
+          } catch (error) {
+            reject(buildStageError('HTTP识别', { message: '响应不是合法 JSON' }));
+            return;
+          }
+        }
+        if (res.statusCode >= 200 && res.statusCode < 300 && data && data.ok) {
+          resolve({ result: data });
+          return;
+        }
+        reject(buildStageError('HTTP识别', (data && data.message ? data : res)));
+      },
+      fail: (error) => reject(buildStageError('HTTP识别请求', error))
+    });
+  }));
 }
 
 function callImageClassifier(fileId, hint) {
@@ -265,16 +315,20 @@ Page({
     const hint = `${this.data.form.title} ${this.data.form.description}`.trim();
 
     if (!app.globalData.cloudReady || !wx.cloud) {
-      const fallback = classifyByText(hint);
-      const nextData = {
-        imageDetecting: false,
-        imageHint: '已选择图片；配置云端图像识别后可自动提取物品'
-      };
-      if (fallback.confidence > 0) {
-        nextData['form.category'] = fallback.category;
-        nextData['form.aiTags'] = fallback.aiTags;
-      }
-      this.setData(nextData, () => this.updateFoundDescription(false));
+      callHttpImageClassifier(filePath, hint)
+        .then((classifyRes) => this.applyImageRecognition(classifyRes.result.data || {}))
+        .catch((error) => {
+          const fallback = classifyByText(hint);
+          const nextData = {
+            imageDetecting: false,
+            imageHint: `图片识别失败：${getCloudErrorMessage(error, '请手动填写物品信息')}`
+          };
+          if (fallback.confidence > 0) {
+            nextData['form.category'] = fallback.category;
+            nextData['form.aiTags'] = fallback.aiTags;
+          }
+          this.setData(nextData, () => this.updateFoundDescription(false));
+        });
       return;
     }
 
@@ -284,6 +338,12 @@ Page({
           const result = classifyRes.result && classifyRes.result.ok ? classifyRes.result.data : {};
           return Object.assign({}, result, { fileId: uploadRes.fileID });
         });
+      })
+      .catch((error) => {
+        if (shouldUseHttpClassifier(error)) {
+          return callHttpImageClassifier(filePath, hint).then((classifyRes) => classifyRes.result.data || {});
+        }
+        throw error;
       })
       .then((result) => this.applyImageRecognition(result))
       .catch((error) => {

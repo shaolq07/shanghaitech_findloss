@@ -56,6 +56,105 @@ function fail(message, code = 'BAD_REQUEST') {
   return { ok: false, code, message };
 }
 
+function httpResponse(payload, statusCode = 200) {
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS'
+    },
+    body: JSON.stringify(payload)
+  };
+}
+
+function getHeader(headers = {}, name) {
+  const target = name.toLowerCase();
+  const keys = Object.keys(headers || {});
+  for (let i = 0; i < keys.length; i += 1) {
+    if (keys[i].toLowerCase() === target) return headers[keys[i]];
+  }
+  return '';
+}
+
+function splitBuffer(buffer, separator) {
+  const chunks = [];
+  let start = 0;
+  let index = buffer.indexOf(separator, start);
+  while (index !== -1) {
+    chunks.push(buffer.slice(start, index));
+    start = index + separator.length;
+    index = buffer.indexOf(separator, start);
+  }
+  chunks.push(buffer.slice(start));
+  return chunks;
+}
+
+function trimPartContent(buffer) {
+  let end = buffer.length;
+  if (end >= 2 && buffer[end - 2] === 13 && buffer[end - 1] === 10) end -= 2;
+  return buffer.slice(0, end);
+}
+
+function parseMultipartBody(event = {}) {
+  const contentType = getHeader(event.headers, 'content-type');
+  const matched = String(contentType).match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!matched) return null;
+
+  const boundary = matched[1] || matched[2];
+  const bodyBuffer = event.isBase64Encoded
+    ? Buffer.from(event.body || '', 'base64')
+    : Buffer.from(event.body || '', 'binary');
+  const result = {};
+
+  splitBuffer(bodyBuffer, Buffer.from(`--${boundary}`)).forEach((part) => {
+    let current = part;
+    if (current.length >= 2 && current[0] === 13 && current[1] === 10) {
+      current = current.slice(2);
+    }
+    if (!current.length || current.slice(0, 2).toString() === '--') return;
+
+    const headerEnd = current.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd === -1) return;
+    const headerText = current.slice(0, headerEnd).toString('utf8');
+    const content = trimPartContent(current.slice(headerEnd + 4));
+    const nameMatch = headerText.match(/name="([^"]+)"/i);
+    if (!nameMatch) return;
+
+    const name = nameMatch[1];
+    const hasFilename = /filename="/i.test(headerText);
+    if (hasFilename || name === 'file' || name === 'image') {
+      result.imageBase64 = content.toString('base64');
+      return;
+    }
+    result[name] = content.toString('utf8').trim();
+  });
+
+  return result;
+}
+
+function parseHttpEvent(event = {}) {
+  if (!event.httpMethod && typeof event.body === 'undefined') return null;
+  if (event.httpMethod === 'OPTIONS') return { action: '__options' };
+
+  const multipartBody = parseMultipartBody(event);
+  if (multipartBody) return multipartBody;
+
+  let body = event.body || {};
+  if (event.isBase64Encoded && typeof body === 'string') {
+    body = Buffer.from(body, 'base64').toString('utf8');
+  }
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body || '{}');
+    } catch (error) {
+      return { action: '__bad_request', message: 'HTTP 请求体不是合法 JSON' };
+    }
+  }
+  return body || {};
+}
+
 function now() {
   return db.serverDate();
 }
@@ -80,6 +179,10 @@ async function getImageBase64(fileId) {
   if (!fileId) throw new Error('缺少图片 fileId');
   const result = await cloud.downloadFile({ fileID: fileId });
   return Buffer.from(result.fileContent).toString('base64');
+}
+
+function normalizeImageBase64(imageBase64 = '') {
+  return String(imageBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').trim();
 }
 
 function normalizeText(text = '') {
@@ -292,13 +395,15 @@ async function listLocations(event) {
 }
 
 async function classifyImage(event) {
-  if (IMAGE_PROVIDER !== 'tencent-hunyuan' || !hasHunyuanCredentials() || !event.fileId) {
+  if (IMAGE_PROVIDER !== 'tencent-hunyuan' || !hasHunyuanCredentials() || (!event.fileId && !event.imageBase64)) {
     const classification = classifyByText(event.hint || '');
     return ok(buildImageClassificationResult(classification, event.hint || ''));
   }
 
   try {
-    const imageBase64 = await getImageBase64(event.fileId);
+    const imageBase64 = event.imageBase64
+      ? normalizeImageBase64(event.imageBase64)
+      : await getImageBase64(event.fileId);
     return ok(await callHunyuanVision(imageBase64, event.hint || ''));
   } catch (error) {
     console.warn('Image classification failed:', error.message || error);
@@ -307,6 +412,35 @@ async function classifyImage(event) {
     }
     const classification = classifyByText(event.hint || '');
     return ok(buildImageClassificationResult(classification, event.hint || ''));
+  }
+}
+
+async function handleAction(event, context) {
+  switch (event.action) {
+    case 'login':
+      return login(event, context);
+    case 'createItem':
+      return createItem(event, context);
+    case 'classifyImage':
+      return classifyImage(event);
+    case 'listItems':
+      return listItems(event);
+    case 'getItemDetail':
+      return getItemDetail(event);
+    case 'listLocations':
+      return listLocations(event);
+    case 'createComment':
+      return createComment(event, context);
+    case 'sendThanks':
+      return sendThanks(event, context);
+    case 'markReturned':
+      return updateReturnStatus(event, context, true);
+    case 'undoReturned':
+      return updateReturnStatus(event, context, false);
+    case 'reportContent':
+      return reportContent(event, context);
+    default:
+      return fail(`未知 action: ${event.action}`);
   }
 }
 
@@ -439,33 +573,18 @@ async function reportContent(event, context) {
 exports.main = async (event) => {
   const context = cloud.getWXContext();
   try {
-    switch (event.action) {
-      case 'login':
-        return login(event, context);
-      case 'createItem':
-        return createItem(event, context);
-      case 'classifyImage':
-        return classifyImage(event);
-      case 'listItems':
-        return listItems(event);
-      case 'getItemDetail':
-        return getItemDetail(event);
-      case 'listLocations':
-        return listLocations(event);
-      case 'createComment':
-        return createComment(event, context);
-      case 'sendThanks':
-        return sendThanks(event, context);
-      case 'markReturned':
-        return updateReturnStatus(event, context, true);
-      case 'undoReturned':
-        return updateReturnStatus(event, context, false);
-      case 'reportContent':
-        return reportContent(event, context);
-      default:
-        return fail(`未知 action: ${event.action}`);
+    const httpEvent = parseHttpEvent(event);
+    if (httpEvent) {
+      if (httpEvent.action === '__options') return httpResponse(ok({}));
+      if (httpEvent.action === '__bad_request') return httpResponse(fail(httpEvent.message), 400);
+      const result = await handleAction(httpEvent, context);
+      return httpResponse(result, result.ok ? 200 : 400);
     }
+    return handleAction(event, context);
   } catch (error) {
+    if (event && (event.httpMethod || typeof event.body !== 'undefined')) {
+      return httpResponse(fail(error.message || '服务异常', 'INTERNAL_ERROR'), 500);
+    }
     return fail(error.message || '服务异常', 'INTERNAL_ERROR');
   }
 };
