@@ -13,7 +13,7 @@
     </button>
     <view wx:if="{{imageHint}}" class="assist-row {{imageDetecting ? 'loading' : ''}}">{{imageHint}}</view>
 
-    <input class="field" placeholder="物品标题，可不填" value="{{form.title}}" bindinput="onInput" data-field="title" />
+    <input class="field" placeholder="上传图片后自动填充标题，可手动修改" value="{{form.title}}" bindinput="onInput" data-field="title" />
 
     <view class="description-head">
       <text class="row-label compact">描述</text>

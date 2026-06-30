@@ -139,6 +139,7 @@ Page({
     locationListTitle: '全部地点',
     form: initialForm(),
     descriptionAutoFilled: false,
+    titleAutoFilled: false,
     imageDetecting: false,
     imageHint: '',
     locationDetecting: false,
@@ -199,6 +200,9 @@ Page({
     const nextData = { [`form.${field}`]: value };
     if (field === 'description') {
       nextData.descriptionAutoFilled = false;
+    }
+    if (field === 'title') {
+      nextData.titleAutoFilled = false;
     }
     this.setData(nextData);
     if (field === 'title' || field === 'description') {
@@ -364,7 +368,8 @@ Page({
       nextForm.imageFileId = result.fileId;
       nextForm.imageUrls = [result.fileId];
     }
-    if (!nextForm.title && itemName) {
+    const shouldAutoFillTitle = itemName && (!(nextForm.title || '').trim() || this.data.titleAutoFilled);
+    if (shouldAutoFillTitle) {
       nextForm.title = itemName;
     }
     if (result.category) {
@@ -386,6 +391,7 @@ Page({
     this.setData({
       form: nextForm,
       descriptionAutoFilled: didAutoFillDescription || this.data.descriptionAutoFilled,
+      titleAutoFilled: shouldAutoFillTitle || this.data.titleAutoFilled,
       imageDetecting: false,
       imageHint: itemName ? `已识别：${itemName}` : '未能明确识别物品，请手动确认'
     });
@@ -419,7 +425,8 @@ Page({
       locationKeyword: '',
       locations: searchLocations(),
       locationListTitle: '全部地点',
-      descriptionAutoFilled: false
+      descriptionAutoFilled: false,
+      titleAutoFilled: false
     });
     wx.navigateTo({ url: `/pages/detail/detail?id=${item._id}` });
   }
