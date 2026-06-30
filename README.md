@@ -6,7 +6,7 @@
 
 - 微信一键登录的轻注册体验。
 - 发布失物/拾物线索，支持图片、地点、详情描述和分类。
-- 标题/描述本地模拟 AI 分类，云函数保留真实图像识别 API 接入点。
+- 标题/描述本地模拟 AI 分类，云函数支持腾讯云混元视觉模型自动提取物品。
 - 查找页按分类浏览，地图页在小程序内展示上科大地点 pin 点，不跳转外部网页。
 - 详情页支持评论、感谢、举报、标记“已回家”和撤回。
 - 已找到分区、消息中心、我的发布。
@@ -44,17 +44,30 @@
    - `undoReturned`
    - `reportContent`
 
-## 接入真实图像识别
+## 配置云端图像识别
 
-当前 `classifyImage` 使用文字兜底分类，便于 MVP 稳定运行。接腾讯云/百度/阿里图像识别时，只需要替换 `cloudfunctions/lostfound/index.js` 里的 `classifyImage` 函数：
+云函数 `classifyImage` 已接入腾讯云混元 OpenAI 兼容视觉接口：
 
-- 根据 `event.fileId` 下载云存储图片或换取临时链接。
-- 调用图像识别 API。
-- 将 API 标签映射到固定分类：证件、电子产品、书本资料、衣物、钥匙、校园卡、雨伞、水杯、其他。
-- 识别失败返回 `其他`，前端仍允许用户手动修改。
+- 将图片以 base64 形式发送给视觉模型。
+- 要求模型返回结构化 JSON：物品名、分类、标签、置信度和招领描述。
+- 分类固定为：证件、电子产品、书本资料、衣物、钥匙、校园卡、雨伞、水杯、其他。
+- 未配置 API Key 或识别失败时自动回退到文字兜底分类，前端仍允许用户手动修改。
+
+配置步骤：
+
+1. 在腾讯云控制台开通混元模型服务，并创建 API Key。
+2. 在微信云开发控制台给 `lostfound` 云函数配置环境变量：
+   - `IMAGE_RECOGNITION_PROVIDER=tencent-hunyuan`
+   - `TENCENTCLOUD_API_KEY=你的 sk-... API Key`
+   - `HUNYUAN_API_URL=https://api.hunyuan.cloud.tencent.com/v1/chat/completions`
+   - `HUNYUAN_VISION_MODEL=hunyuan-vision-1.5-instruct`
+3. 在 `cloudfunctions/lostfound` 目录执行 `npm install`，或在微信开发者工具中勾选“上传并部署：云端安装依赖”。
+4. 重新上传并部署 `lostfound` 云函数。
+
+注意：不要把 API Key 写进前端或提交到仓库，只放在云函数环境变量里。
 
 ## 重要说明
 
-- 地图 tab 通过 `web-view` 内嵌上海科技大学官方地图 `https://map.shanghaitech.edu.cn/`。正式上线前需要在微信公众平台配置业务域名 `map.shanghaitech.edu.cn`。
+- 地图 tab 使用小程序原生地图展示校内地点和线索数量，不再依赖外部 `web-view` 域名。
 - 第一版通知采用站内消息；真实微信订阅消息可在 `sendThanks` 和 `createComment` 后追加发送逻辑。
 - 页面默认走本地 `utils/store.js`，这样无云环境也能演示；正式版可将 store 方法逐步替换为 `wx.cloud.callFunction({ name: 'lostfound', data: { action, ... } })`。

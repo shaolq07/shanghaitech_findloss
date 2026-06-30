@@ -1,4 +1,5 @@
 const cloud = require('wx-server-sdk');
+const https = require('https');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
@@ -28,6 +29,22 @@ const CATEGORY_KEYWORDS = {
 
 const BAD_WORDS = ['辱骂', '广告', '诈骗', '加群'];
 
+const IMAGE_PROVIDER = process.env.IMAGE_RECOGNITION_PROVIDER || 'tencent-hunyuan';
+const HUNYUAN_API_KEY = process.env.TENCENTCLOUD_API_KEY || process.env.HUNYUAN_API_KEY;
+const HUNYUAN_API_URL = process.env.HUNYUAN_API_URL || 'https://api.hunyuan.cloud.tencent.com/v1/chat/completions';
+const HUNYUAN_VISION_MODEL = process.env.HUNYUAN_VISION_MODEL || 'hunyuan-vision-1.5-instruct';
+
+const CATEGORY_ALIASES = {
+  '证件': ['证件', '身份证', '学生证', '护照', '驾驶证', '银行卡', '卡片'],
+  '电子产品': ['手机', '电脑', '笔记本电脑', '平板', '耳机', '充电器', '数据线', '相机', '鼠标', '键盘', 'u盘', '硬盘', '电子'],
+  '书本资料': ['书', '教材', '笔记本', '笔记', '资料', '文件', '试卷', '纸张', '书包'],
+  '衣物': ['衣服', '外套', '上衣', '裤子', '帽子', '围巾', '手套', '鞋', '包'],
+  '钥匙': ['钥匙', '钥匙串', '门禁'],
+  '校园卡': ['校园卡', '一卡通', '饭卡', '学生卡'],
+  '雨伞': ['伞', '雨伞', '折叠伞'],
+  '水杯': ['杯', '水杯', '保温杯', '杯子', '瓶子', '水瓶']
+};
+
 function ok(data = {}) {
   return { ok: true, data };
 }
@@ -50,6 +67,172 @@ function classifyByText(text = '') {
     }
   }
   return { category: '其他', aiTags: ['待确认'], confidence: 0 };
+}
+
+function hasHunyuanCredentials() {
+  return Boolean(HUNYUAN_API_KEY);
+}
+
+async function getImageBase64(fileId) {
+  if (!fileId) throw new Error('缺少图片 fileId');
+  const result = await cloud.downloadFile({ fileID: fileId });
+  return Buffer.from(result.fileContent).toString('base64');
+}
+
+function normalizeText(text = '') {
+  return String(text).trim().toLowerCase();
+}
+
+function mapCategoryFromLabels(labels = []) {
+  const source = labels
+    .map((label) => [label.name, label.firstCategory, label.secondCategory, label.parents].filter(Boolean).join(' '))
+    .join(' ')
+    .toLowerCase();
+
+  const categories = Object.keys(CATEGORY_ALIASES);
+  for (let i = 0; i < categories.length; i += 1) {
+    const category = categories[i];
+    if (CATEGORY_ALIASES[category].some((word) => source.includes(normalizeText(word)))) {
+      return category;
+    }
+  }
+  return '其他';
+}
+
+function unique(values) {
+  const seen = {};
+  return values.filter((value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen[normalized]) return false;
+    seen[normalized] = true;
+    return true;
+  });
+}
+
+function postJson(urlString, payload, headers = {}) {
+  const url = new URL(urlString);
+  const body = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: url.hostname,
+      path: `${url.pathname}${url.search}`,
+      port: url.port || 443,
+      method: 'POST',
+      headers: Object.assign({
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }, headers),
+      timeout: 25000
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(text));
+        } catch (error) {
+          reject(new Error(`响应不是 JSON: ${text.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy(new Error('图像识别请求超时'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+function extractJsonObject(content = '') {
+  const text = String(content).trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const matched = text.match(/\{[\s\S]*\}/);
+    if (!matched) throw error;
+    return JSON.parse(matched[0]);
+  }
+}
+
+function normalizeVisionResult(result = {}) {
+  const rawTags = Array.isArray(result.aiTags) ? result.aiTags : (Array.isArray(result.labels) ? result.labels : []);
+  const labels = rawTags
+    .map((tag) => (typeof tag === 'string' ? { name: tag } : { name: tag.name || tag.label || '', confidence: tag.confidence || tag.score || 0 }))
+    .filter((label) => label.name);
+  const itemName = String(result.itemName || result.title || (labels[0] && labels[0].name) || '').trim();
+  const categories = Object.keys(CATEGORY_ALIASES);
+  const category = categories.includes(result.category)
+    ? result.category
+    : mapCategoryFromLabels([{ name: itemName }].concat(labels));
+  const confidenceValue = Number(result.confidence || (labels[0] && labels[0].confidence) || 0);
+  const confidence = confidenceValue > 1 ? Math.round(confidenceValue) / 100 : confidenceValue;
+  const tagNames = unique(labels.map((label) => label.name)).slice(0, 4);
+
+  return {
+    itemName,
+    title: itemName,
+    category,
+    aiTags: unique(['图片识别'].concat(tagNames, category === '其他' ? [] : [category])),
+    confidence,
+    description: result.description || '',
+    provider: 'tencent-hunyuan'
+  };
+}
+
+async function callHunyuanVision(imageBase64, hint = '') {
+  const categories = Object.keys(CATEGORY_ALIASES).join('、');
+  const prompt = [
+    '请识别图片中的主要失物或拾物，只返回 JSON，不要输出 Markdown。',
+    `category 必须从以下枚举中选择：${categories}、其他。`,
+    'JSON 格式：{"itemName":"简短中文物品名","category":"分类","aiTags":["标签1","标签2"],"confidence":0.0,"description":"一句适合招领帖的描述"}。',
+    '如果图片中有多个物体，选择最像用户要发布的那个；不要猜测姓名、学号、手机号等隐私。',
+    hint ? `用户已有提示：${hint}` : ''
+  ].filter(Boolean).join('\n');
+
+  const response = await postJson(HUNYUAN_API_URL, {
+    model: HUNYUAN_VISION_MODEL,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } }
+        ]
+      }
+    ],
+    temperature: 0.1,
+    max_tokens: 300
+  }, {
+    Authorization: `Bearer ${HUNYUAN_API_KEY}`
+  });
+
+  const content = response.choices
+    && response.choices[0]
+    && response.choices[0].message
+    && response.choices[0].message.content;
+  return normalizeVisionResult(extractJsonObject(content || ''));
+}
+
+function buildImageClassificationResult(classification, hint = '') {
+  const trimmedHint = (hint || '').trim();
+  const itemName = classification.category === '其他' ? '' : classification.category;
+  const title = itemName || (trimmedHint.length <= 18 ? trimmedHint : '');
+  return {
+    itemName: title,
+    title,
+    category: classification.category,
+    aiTags: ['图片识别'].concat(classification.aiTags || []),
+    confidence: classification.confidence,
+    description: '',
+    provider: 'text-fallback'
+  };
 }
 
 async function ensureUser(openid, profile = {}) {
@@ -97,9 +280,19 @@ async function listLocations(event) {
 }
 
 async function classifyImage(event) {
-  // Production hook: call Tencent Cloud/Baidu/Ali image recognition here with event.fileId.
-  // The text fallback keeps the MVP deterministic until API credentials are configured.
-  return ok(classifyByText(event.hint || ''));
+  if (IMAGE_PROVIDER !== 'tencent-hunyuan' || !hasHunyuanCredentials() || !event.fileId) {
+    const classification = classifyByText(event.hint || '');
+    return ok(buildImageClassificationResult(classification, event.hint || ''));
+  }
+
+  const imageBase64 = await getImageBase64(event.fileId);
+  try {
+    return ok(await callHunyuanVision(imageBase64, event.hint || ''));
+  } catch (error) {
+    console.warn('Hunyuan vision failed:', error.message || error);
+    const classification = classifyByText(event.hint || '');
+    return ok(buildImageClassificationResult(classification, event.hint || ''));
+  }
 }
 
 async function createItem(event, context) {

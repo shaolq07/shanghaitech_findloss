@@ -11,6 +11,13 @@ const LOCATIONS = [
   { _id: 'gate', name: '校门口', aliases: ['门口', '入口'], area: '公共区', mapX: 14, mapY: 76, sortOrder: 10, enabled: true }
 ];
 
+const CAMPUS_BOUNDS = {
+  west: 121.5828,
+  east: 121.5972,
+  north: 31.184,
+  south: 31.1742
+};
+
 function searchLocations(keyword = '') {
   const normalized = keyword.trim().toLowerCase();
   return LOCATIONS
@@ -23,7 +30,60 @@ function searchLocations(keyword = '') {
     .sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
+function locationToCoordinate(location) {
+  const longitude = CAMPUS_BOUNDS.west + ((CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west) * location.mapX) / 100;
+  const latitude = CAMPUS_BOUNDS.north - ((CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south) * location.mapY) / 100;
+  return { latitude, longitude };
+}
+
+function distanceInMeters(from, to) {
+  const earthRadius = 6371000;
+  const lat1 = (from.latitude * Math.PI) / 180;
+  const lat2 = (to.latitude * Math.PI) / 180;
+  const deltaLat = ((to.latitude - from.latitude) * Math.PI) / 180;
+  const deltaLng = ((to.longitude - from.longitude) * Math.PI) / 180;
+  const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2)
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
+
+function formatDistance(distance) {
+  if (distance >= 1000) return `约 ${(distance / 1000).toFixed(1)} 公里`;
+  return `约 ${Math.round(distance)} 米`;
+}
+
+function findNearbyLocations(latitude, longitude, limit = 6) {
+  const current = { latitude, longitude };
+  return searchLocations()
+    .map((location) => {
+      const coordinate = locationToCoordinate(location);
+      const distance = Math.round(distanceInMeters(current, coordinate));
+      return {
+        location,
+        distance
+      };
+    })
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, limit)
+    .map((entry) => Object.assign({}, entry.location, {
+      distance: entry.distance,
+      distanceText: formatDistance(entry.distance),
+      meta: `${entry.location.area} · ${formatDistance(entry.distance)}`
+    }));
+}
+
+function findNearestLocation(latitude, longitude, maxDistance = 800) {
+  const nearest = findNearbyLocations(latitude, longitude, 1)[0];
+
+  if (!nearest || nearest.distance > maxDistance) return null;
+  return nearest;
+}
+
 module.exports = {
   LOCATIONS,
-  searchLocations
+  searchLocations,
+  locationToCoordinate,
+  findNearbyLocations,
+  findNearestLocation
 };

@@ -1,1 +1,58 @@
-<web-view src="{{officialMapUrl}}"></web-view>
+<view class="page map-page">
+  <view class="map-head">
+    <view>
+      <text class="map-title">上科大地图</text>
+      <text class="map-subtitle">{{activeTotal}} 条线索 · {{activeLocationCount}} 个地点有标记</text>
+    </view>
+    <button class="refresh-button" bindtap="loadMapData">刷新</button>
+  </view>
+
+  <map
+    class="campus-map"
+    latitude="{{campus.latitude}}"
+    longitude="{{campus.longitude}}"
+    scale="{{campus.scale}}"
+    markers="{{markers}}"
+    show-location="{{false}}"
+    enable-3D="{{false}}"
+    enable-overlooking="{{false}}"
+    enable-rotate="{{false}}"
+    bindmarkertap="selectMarker"
+    bindcallouttap="selectMarker"
+  ></map>
+
+  <view class="legend">
+    <view class="legend-item">
+      <text class="legend-dot active"></text>
+      <text>有活跃线索</text>
+    </view>
+    <view class="legend-item">
+      <text class="legend-dot"></text>
+      <text>暂无线索</text>
+    </view>
+  </view>
+
+  <view class="location-panel" wx:if="{{selectedLocation}}">
+    <view class="panel-head">
+      <view>
+        <text class="panel-title">{{selectedLocation.name}}</text>
+        <text class="panel-meta">{{selectedLocation.area}} · {{selectedLocation.count}} 条活跃线索</text>
+      </view>
+    </view>
+
+    <view wx:if="{{selectedItems.length === 0}}" class="empty small">这个地点暂时没有活跃线索</view>
+    <view
+      wx:for="{{selectedItems}}"
+      wx:key="_id"
+      class="location-item"
+      bindtap="goDetail"
+      data-id="{{item._id}}"
+    >
+      <view>
+        <text class="item-title">{{item.title}}</text>
+        <text class="item-meta">{{item.type === 'lost' ? '寻物' : '招领'}} · {{item.category}}</text>
+      </view>
+      <text class="item-pill">{{item.type === 'lost' ? '寻' : '招'}}</text>
+    </view>
+  </view>
+</view>

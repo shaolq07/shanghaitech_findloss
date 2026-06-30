@@ -9,11 +9,17 @@
 
     <button class="image-picker" bindtap="chooseImage">
       <image wx:if="{{form.imageUrls.length}}" src="{{form.imageUrls[0]}}" mode="aspectFill" />
-      <text wx:else>上传图片，可留空</text>
+      <text wx:else>上传图片，自动识别物品</text>
     </button>
+    <view wx:if="{{imageHint}}" class="assist-row {{imageDetecting ? 'loading' : ''}}">{{imageHint}}</view>
 
     <input class="field" placeholder="物品标题，可不填" value="{{form.title}}" bindinput="onInput" data-field="title" />
-    <textarea class="field textarea" placeholder="补充描述，可不填" value="{{form.description}}" bindinput="onInput" data-field="description" />
+
+    <view class="description-head">
+      <text class="row-label compact">描述</text>
+      <button wx:if="{{form.type === 'found'}}" class="auto-desc-button" bindtap="fillFoundDescription">自动填充</button>
+    </view>
+    <textarea class="field textarea" placeholder="{{form.type === 'found' ? '可自动填充招领描述，也可以手动补充特征' : '补充描述，可不填'}}" value="{{form.description}}" bindinput="onInput" data-field="description" />
 
     <view class="row-label">自动识别分类，可不选</view>
     <view wx:if="{{form.category}}" class="ai-result">
@@ -31,9 +37,16 @@
       >{{item}}</view>
     </scroll-view>
 
-    <view class="row-label">地点，可不选</view>
+    <view class="location-head">
+      <text class="row-label compact">地点</text>
+      <button class="auto-location-button {{locationDetecting ? 'disabled' : ''}}" bindtap="locateCurrentPosition" disabled="{{locationDetecting}}">
+        {{locationDetecting ? '定位中' : '自动定位'}}
+      </button>
+    </view>
+    <view wx:if="{{locationHint}}" class="assist-row {{locationDetecting ? 'loading' : ''}}">{{locationHint}}</view>
     <input class="field" placeholder="搜索地点，如 图书馆、食堂、宿舍" value="{{locationKeyword}}" bindinput="searchLocation" />
     <button wx:if="{{form.locationId}}" class="clear-location" bindtap="clearLocation">不选择地点</button>
+    <view class="location-list-title">{{locationListTitle}}</view>
     <view class="location-list">
       <view
         wx:for="{{locations}}"
@@ -43,7 +56,7 @@
         data-id="{{item._id}}"
       >
         <text>{{item.name}}</text>
-        <text>{{item.area}}</text>
+        <text>{{item.meta ? item.meta : item.area}}</text>
       </view>
     </view>
 

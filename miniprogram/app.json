@@ -15,6 +15,14 @@
     "navigationBarTextStyle": "black",
     "backgroundColor": "#f6f7f9"
   },
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于自动填充失物招领的校内地点"
+    }
+  },
+  "requiredPrivateInfos": [
+    "getLocation"
+  ],
   "tabBar": {
     "color": "#6b7280",
     "selectedColor": "#0f766e",
