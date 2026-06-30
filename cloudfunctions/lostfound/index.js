@@ -416,9 +416,20 @@ function normalizeVisionResult(result = {}) {
     category,
     aiTags: unique(['图片识别'].concat(tagNames, category === '其他' ? [] : [category])),
     confidence,
-    description: result.description || '',
+    description: cleanVisionDescription(result.description || ''),
     provider: 'tencent-hunyuan'
   };
+}
+
+function cleanVisionDescription(description = '') {
+  return String(description)
+    .replace(/请失主[^。！？]*[。！？]?/g, '')
+    .replace(/请在评论[^。！？]*[。！？]?/g, '')
+    .replace(/在评论中[^。！？]*[。！？]?/g, '')
+    .replace(/确认无误后[^。！？]*[。！？]?/g, '')
+    .replace(/再约时间地点领取[。！？]?/g, '')
+    .replace(/联系[^。！？]*领取[。！？]?/g, '')
+    .trim();
 }
 
 async function callHunyuanVision(imageBase64, hint = '') {
@@ -426,7 +437,8 @@ async function callHunyuanVision(imageBase64, hint = '') {
   const prompt = [
     '请识别图片中的主要失物或拾物，只返回 JSON，不要输出 Markdown。',
     `category 必须从以下枚举中选择：${categories}、其他。`,
-    'JSON 格式：{"itemName":"简短中文物品名","category":"分类","aiTags":["标签1","标签2"],"confidence":0.0,"description":"一句适合招领帖的描述"}。',
+    'JSON 格式：{"itemName":"简短中文物品名","category":"分类","aiTags":["标签1","标签2"],"confidence":0.0,"description":"一句客观物品信息描述"}。',
+    'description 只描述物品本身的可见信息，例如颜色、品牌、形状、材质、数量；不要写评论、联系、确认、领取、约时间地点等流程性内容。',
     '如果图片中有多个物体，选择最像用户要发布的那个；不要猜测姓名、学号、手机号等隐私。',
     hint ? `用户已有提示：${hint}` : ''
   ].filter(Boolean).join('\n');

@@ -33,7 +33,18 @@ function buildFoundDescription(form) {
   const itemName = getFoundItemName(form);
   const location = getSelectedLocation(form.locationId);
   const placeText = location ? `${location.name}附近` : '校内';
-  return `在${placeText}捡到${itemName}。请失主在评论中说明物品特征，确认无误后再约时间地点领取。`;
+  return `在${placeText}发现${itemName}。物品信息以图片识别和现场位置为准。`;
+}
+
+function cleanAutoDescription(description = '') {
+  return String(description)
+    .replace(/请失主[^。！？]*[。！？]?/g, '')
+    .replace(/请在评论[^。！？]*[。！？]?/g, '')
+    .replace(/在评论中[^。！？]*[。！？]?/g, '')
+    .replace(/确认无误后[^。！？]*[。！？]?/g, '')
+    .replace(/再约时间地点领取[。！？]?/g, '')
+    .replace(/联系[^。！？]*领取[。！？]?/g, '')
+    .trim();
 }
 
 function getFileExtension(filePath) {
@@ -383,7 +394,7 @@ Page({
     if (nextForm.type === 'found') {
       const currentDescription = (nextForm.description || '').trim();
       if (!currentDescription || this.data.descriptionAutoFilled) {
-        nextForm.description = result.description || buildFoundDescription(nextForm);
+        nextForm.description = cleanAutoDescription(result.description) || buildFoundDescription(nextForm);
         didAutoFillDescription = true;
       }
     }
