@@ -5,6 +5,7 @@ Page({
   data: {
     categories: CATEGORIES,
     activeCategory: '全部',
+    searchKeyword: '',
     items: []
   },
 
@@ -14,12 +15,24 @@ Page({
 
   loadItems() {
     this.setData({
-      items: listItems({ category: this.data.activeCategory, status: 'active' })
+      items: listItems({
+        category: this.data.activeCategory,
+        status: 'active',
+        keyword: this.data.searchKeyword
+      })
     });
   },
 
   selectCategory(event) {
     this.setData({ activeCategory: event.currentTarget.dataset.category }, () => this.loadItems());
+  },
+
+  onSearchInput(event) {
+    this.setData({ searchKeyword: event.detail.value }, () => this.loadItems());
+  },
+
+  clearSearch() {
+    this.setData({ searchKeyword: '' }, () => this.loadItems());
   },
 
   startPublish() {

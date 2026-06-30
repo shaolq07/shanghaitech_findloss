@@ -2,8 +2,19 @@
   <view class="hero">
     <view>
       <text class="hero-title">今天也帮物品回家</text>
-      <text class="hero-subtitle">按分类或地点快速找，向下滑动查看更多线索。</text>
+      <text class="hero-subtitle">输入物品、颜色、地点，或按分类浏览线索。</text>
     </view>
+  </view>
+
+  <view class="search-row">
+    <input
+      class="search-input"
+      placeholder="搜水壶、黑色杯子、图书馆证件"
+      value="{{searchKeyword}}"
+      confirm-type="search"
+      bindinput="onSearchInput"
+    />
+    <button wx:if="{{searchKeyword}}" class="search-clear" bindtap="clearSearch">清除</button>
   </view>
 
   <scroll-view class="category-bar" scroll-x>

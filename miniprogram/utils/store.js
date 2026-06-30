@@ -1,6 +1,7 @@
 const { LOCATIONS, searchLocations } = require('./locations');
 const { classifyByText } = require('./classifier');
 const { BAD_WORDS } = require('./constants');
+const { buildItemSearchTags, semanticMatchItem } = require('./semantic');
 
 const KEY = 'lost_found_state_v1';
 
@@ -77,6 +78,10 @@ function createSeedState() {
     }
   ];
 
+  items.forEach((item) => {
+    item.searchTags = buildItemSearchTags(item);
+  });
+
   return {
     currentUser: {
       openid: 'local_demo_openid',
@@ -139,11 +144,17 @@ function listItems(filters = {}) {
   const state = getState();
   const status = filters.status || 'active';
   const category = filters.category || '全部';
+  const keyword = filters.keyword || '';
   return state.items
     .filter((item) => item.status === status)
     .filter((item) => category === '全部' || item.category === category)
     .filter((item) => !filters.locationId || item.locationId === filters.locationId)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    .map((item) => {
+      const match = semanticMatchItem(item, keyword);
+      return Object.assign({}, item, { semanticScore: match.score, searchTags: item.searchTags || buildItemSearchTags(item) });
+    })
+    .filter((item) => !keyword.trim() || semanticMatchItem(item, keyword).matched)
+    .sort((a, b) => (b.semanticScore - a.semanticScore) || (new Date(b.createdAt) - new Date(a.createdAt)));
 }
 
 function getItemDetail(itemId) {
@@ -181,6 +192,7 @@ function createItem(payload) {
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
+  item.searchTags = buildItemSearchTags(item);
   state.items.unshift(item);
   setState(state);
   return item;

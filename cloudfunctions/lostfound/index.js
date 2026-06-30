@@ -48,6 +48,45 @@ const CATEGORY_ALIASES = {
   '水杯': ['杯', '水杯', '保温杯', '杯子', '瓶子', '水瓶']
 };
 
+const SEARCH_TAG_GROUPS = [
+  ['水杯', '杯子', '保温杯', '水壶', '水瓶', '瓶子', '杯', 'bottle', 'cup'],
+  ['雨伞', '伞', '折叠伞', '遮阳伞', 'umbrella'],
+  ['校园卡', '一卡通', '饭卡', '学生卡', '校卡', '卡片', 'card'],
+  ['证件', '身份证', '学生证', '护照', '驾驶证', '银行卡', '校园卡', '一卡通', '学生卡', '卡片'],
+  ['手机', '电话', 'iphone', '安卓', '电子产品'],
+  ['电脑', '笔记本电脑', '笔记本', '平板', 'ipad', '电子产品'],
+  ['耳机', '蓝牙耳机', 'airpods', '耳塞', '电子产品'],
+  ['充电器', '充电线', '数据线', '充电宝', '移动电源', '电子产品'],
+  ['书', '书本', '教材', '资料', '文件', '试卷', '纸张', '笔记', '笔记本', '书本资料'],
+  ['衣服', '衣物', '外套', '上衣', '裤子', '帽子', '围巾', '手套', '鞋', '包'],
+  ['钥匙', '钥匙串', '门禁'],
+  ['黑色', '黑', 'black'],
+  ['白色', '白', 'white'],
+  ['蓝色', '蓝', 'blue'],
+  ['红色', '红', 'red'],
+  ['绿色', '绿', 'green'],
+  ['黄色', '黄', 'yellow'],
+  ['灰色', '灰', 'gray', 'grey'],
+  ['粉色', '粉', 'pink'],
+  ['紫色', '紫', 'purple'],
+  ['透明', 'clear'],
+  ['图书馆', '图书', 'lib', 'library'],
+  ['食堂', '餐厅', '饭堂', 'dining'],
+  ['体育馆', '体育场', 'gym'],
+  ['宿舍', '宿舍楼', '学生宿舍'],
+  ['教学楼', '教室', '课堂'],
+  ['实验室', 'lab'],
+  ['行政中心', '行政楼']
+];
+
+const IGNORED_SEARCH_TAGS = {
+  '图片识别': true,
+  '图片自动识别': true,
+  '图片待识别': true,
+  '手动校正': true,
+  '待确认': true
+};
+
 function ok(data = {}) {
   return { ok: true, data };
 }
@@ -187,6 +226,87 @@ function normalizeImageBase64(imageBase64 = '') {
 
 function normalizeText(text = '') {
   return String(text).trim().toLowerCase();
+}
+
+function normalizeSearchText(value = '') {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[，。！？、；：,.!?;:()[\]{}"'“”‘’/\\|-]/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function tokenizeSearchText(value = '') {
+  const normalized = normalizeSearchText(value);
+  const tokens = normalized.match(/[a-z0-9]+|[\u4e00-\u9fa5]{1,8}/g) || [];
+  return tokens.filter((token) => token.length > 1 || /[\u4e00-\u9fa5]/.test(token));
+}
+
+function expandSearchTerms(values = []) {
+  const source = normalizeSearchText(values.join(' '));
+  const terms = [];
+
+  values.forEach((value) => {
+    if (!IGNORED_SEARCH_TAGS[value]) terms.push(value);
+    terms.push.apply(terms, tokenizeSearchText(value));
+  });
+
+  SEARCH_TAG_GROUPS.forEach((group) => {
+    if (group.some((term) => source.includes(normalizeSearchText(term)))) {
+      terms.push.apply(terms, group);
+    }
+  });
+
+  return unique(terms);
+}
+
+function getMatchedSearchGroups(value = '') {
+  const source = normalizeSearchText(value);
+  return SEARCH_TAG_GROUPS.filter((group) => group.some((term) => source.includes(normalizeSearchText(term))));
+}
+
+function buildItemSearchTags(item = {}) {
+  const baseValues = [
+    item.title,
+    item.description,
+    item.category,
+    item.locationName,
+    item.locationDetail,
+    item.type === 'lost' ? '寻物 丢失 遗失' : '招领 捡到 拾取'
+  ].concat(item.aiTags || []);
+
+  return expandSearchTerms(baseValues).slice(0, 60);
+}
+
+function semanticMatchItem(item = {}, keyword = '') {
+  const query = normalizeSearchText(keyword);
+  if (!query) return { matched: true, score: 0 };
+
+  const queryTerms = expandSearchTerms([keyword]);
+  const queryGroups = getMatchedSearchGroups(keyword);
+  const itemTags = item.searchTags && item.searchTags.length ? item.searchTags : buildItemSearchTags(item);
+  const itemText = normalizeSearchText([
+    item.title,
+    item.description,
+    item.category,
+    item.locationName,
+    item.locationDetail
+  ].concat(item.aiTags || [], itemTags || []).join(' '));
+
+  if (queryGroups.length > 1) {
+    const hasAllGroups = queryGroups.every((group) => group.some((term) => itemText.includes(normalizeSearchText(term))));
+    if (!hasAllGroups) return { matched: false, score: 0 };
+  }
+
+  let score = itemText.includes(query) ? 10 : 0;
+  queryTerms.forEach((term) => {
+    const normalized = normalizeSearchText(term);
+    if (!normalized) return;
+    if (itemText.includes(normalized)) score += 2;
+    if ((itemTags || []).some((tag) => normalizeSearchText(tag) === normalized)) score += 3;
+  });
+
+  return { matched: score > 0, score };
 }
 
 function mapCategoryFromLabels(labels = []) {
@@ -475,6 +595,7 @@ async function createItem(event, context) {
     createdAt: now(),
     updatedAt: now()
   };
+  data.searchTags = buildItemSearchTags(data);
   const created = await db.collection(COLLECTIONS.items).add({ data });
   return ok({ _id: created._id, ...data });
 }
@@ -482,15 +603,29 @@ async function createItem(event, context) {
 async function listItems(event) {
   const filters = event.filters || {};
   const query = { status: filters.status || 'active' };
+  const keyword = (filters.keyword || '').trim();
   if (filters.category && filters.category !== '全部') query.category = filters.category;
   if (filters.locationId) query.locationId = filters.locationId;
   const result = await db.collection(COLLECTIONS.items)
     .where(query)
     .orderBy('createdAt', 'desc')
     .skip(filters.cursor || 0)
-    .limit(filters.limit || 20)
+    .limit(keyword ? 100 : (filters.limit || 20))
     .get();
-  return ok({ items: result.data, nextCursor: (filters.cursor || 0) + result.data.length });
+  let items = result.data.map((item) => {
+    const match = semanticMatchItem(item, keyword);
+    return Object.assign({}, item, {
+      semanticScore: match.score,
+      searchTags: item.searchTags || buildItemSearchTags(item)
+    });
+  });
+  if (keyword) {
+    items = items
+      .filter((item) => semanticMatchItem(item, keyword).matched)
+      .sort((a, b) => (b.semanticScore - a.semanticScore) || (new Date(b.createdAt) - new Date(a.createdAt)))
+      .slice(0, filters.limit || 20);
+  }
+  return ok({ items, nextCursor: (filters.cursor || 0) + items.length });
 }
 
 async function getItemDetail(event) {
