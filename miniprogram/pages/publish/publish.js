@@ -39,6 +39,15 @@ function getFileExtension(filePath) {
   return matched ? matched[1] : 'jpg';
 }
 
+function getCloudErrorMessage(error, fallback = '请检查云开发配置') {
+  const message = error && (error.message || error.errMsg || error.messageText || (error.result && error.result.message));
+  return String(message || fallback).replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function buildStageError(stage, error) {
+  return new Error(`${stage}失败：${getCloudErrorMessage(error)}`);
+}
+
 function uploadImageForRecognition(filePath) {
   const cloudPath = `lostfound/${Date.now()}-${Math.random().toString(16).slice(2, 8)}.${getFileExtension(filePath)}`;
   return new Promise((resolve, reject) => {
@@ -46,7 +55,7 @@ function uploadImageForRecognition(filePath) {
       cloudPath,
       filePath,
       success: resolve,
-      fail: reject
+      fail: (error) => reject(buildStageError('图片上传', error))
     });
   });
 }
@@ -60,8 +69,14 @@ function callImageClassifier(fileId, hint) {
         fileId,
         hint
       },
-      success: resolve,
-      fail: reject
+      success: (res) => {
+        if (res.result && res.result.ok) {
+          resolve(res);
+          return;
+        }
+        reject(buildStageError('云端识别', res.result || res));
+      },
+      fail: (error) => reject(buildStageError('云函数调用', error))
     });
   });
 }
@@ -271,10 +286,11 @@ Page({
         });
       })
       .then((result) => this.applyImageRecognition(result))
-      .catch(() => {
+      .catch((error) => {
+        console.warn('Image recognition failed:', error);
         this.setData({
           imageDetecting: false,
-          imageHint: '图片识别失败，请手动填写物品信息'
+          imageHint: `图片识别失败：${getCloudErrorMessage(error, '请手动填写物品信息')}`
         });
       });
   },

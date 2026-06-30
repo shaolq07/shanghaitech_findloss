@@ -58,9 +58,9 @@
 1. 在腾讯云控制台开通混元模型服务，并创建 API Key。
 2. 在微信云开发控制台给 `lostfound` 云函数配置环境变量：
    - `IMAGE_RECOGNITION_PROVIDER=tencent-hunyuan`
-   - `TENCENTCLOUD_API_KEY=你的 sk-... API Key`
+   - `HUNYUAN_API_KEY=你的 sk-... API Key`
    - `HUNYUAN_API_URL=https://api.hunyuan.cloud.tencent.com/v1/chat/completions`
-   - `HUNYUAN_VISION_MODEL=hunyuan-vision-1.5-instruct`
+   - `HUNYUAN_VISION_MODEL=hunyuan-vision`
 3. 在 `cloudfunctions/lostfound` 目录执行 `npm install`，或在微信开发者工具中勾选“上传并部署：云端安装依赖”。
 4. 重新上传并部署 `lostfound` 云函数。
 

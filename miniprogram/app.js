@@ -9,7 +9,7 @@ App({
   onLaunch() {
     ensureSeedData();
 
-    const cloudEnv = 'replace-with-your-cloud-env-id';
+    const cloudEnv = 'skd-d2gvbeo5c6227bf73';
     if (wx.cloud && cloudEnv !== 'replace-with-your-cloud-env-id') {
       wx.cloud.init({
         env: cloudEnv,

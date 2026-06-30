@@ -32,7 +32,10 @@ const BAD_WORDS = ['辱骂', '广告', '诈骗', '加群'];
 const IMAGE_PROVIDER = process.env.IMAGE_RECOGNITION_PROVIDER || 'tencent-hunyuan';
 const HUNYUAN_API_KEY = process.env.TENCENTCLOUD_API_KEY || process.env.HUNYUAN_API_KEY;
 const HUNYUAN_API_URL = process.env.HUNYUAN_API_URL || 'https://api.hunyuan.cloud.tencent.com/v1/chat/completions';
-const HUNYUAN_VISION_MODEL = process.env.HUNYUAN_VISION_MODEL || 'hunyuan-vision-1.5-instruct';
+const DEFAULT_HUNYUAN_VISION_MODEL = 'hunyuan-vision';
+const HUNYUAN_VISION_MODEL = process.env.HUNYUAN_VISION_MODEL === 'hunyuan-vision-1.5-instruct'
+  ? DEFAULT_HUNYUAN_VISION_MODEL
+  : (process.env.HUNYUAN_VISION_MODEL || DEFAULT_HUNYUAN_VISION_MODEL);
 
 const CATEGORY_ALIASES = {
   '证件': ['证件', '身份证', '学生证', '护照', '驾驶证', '银行卡', '卡片'],
@@ -109,6 +112,10 @@ function unique(values) {
   });
 }
 
+function sanitizeErrorText(text = '') {
+  return String(text).replace(/sk-[A-Za-z0-9_*.-]{8,}/g, '[redacted-api-key]');
+}
+
 function postJson(urlString, payload, headers = {}) {
   const url = new URL(urlString);
   const body = JSON.stringify(payload);
@@ -130,7 +137,7 @@ function postJson(urlString, payload, headers = {}) {
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
+          reject(new Error(`HTTP ${res.statusCode}: ${sanitizeErrorText(text).slice(0, 200)}`));
           return;
         }
         try {
@@ -148,6 +155,11 @@ function postJson(urlString, payload, headers = {}) {
     req.write(body);
     req.end();
   });
+}
+
+function isHunyuanConfigError(error) {
+  const message = String(error && (error.message || error) || '');
+  return /HTTP 401|HTTP 403|Incorrect API key|invalid api key|unauthorized|forbidden/i.test(message);
 }
 
 function extractJsonObject(content = '') {
@@ -285,11 +297,14 @@ async function classifyImage(event) {
     return ok(buildImageClassificationResult(classification, event.hint || ''));
   }
 
-  const imageBase64 = await getImageBase64(event.fileId);
   try {
+    const imageBase64 = await getImageBase64(event.fileId);
     return ok(await callHunyuanVision(imageBase64, event.hint || ''));
   } catch (error) {
-    console.warn('Hunyuan vision failed:', error.message || error);
+    console.warn('Image classification failed:', error.message || error);
+    if (isHunyuanConfigError(error)) {
+      return fail('腾讯混元 API Key 无效或未授权，请重新配置 HUNYUAN_API_KEY', 'HUNYUAN_AUTH_ERROR');
+    }
     const classification = classifyByText(event.hint || '');
     return ok(buildImageClassificationResult(classification, event.hint || ''));
   }
