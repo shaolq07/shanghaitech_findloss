@@ -71,33 +71,116 @@ function sharedCount(a = [], b = []) {
   return a.filter((entry) => target.has(entry)).length;
 }
 
+function sharedValues(a = [], b = []) {
+  const target = new Set(b);
+  return a.filter((entry) => target.has(entry));
+}
+
+function getFeatureText(payload = {}) {
+  return [
+    payload.title,
+    payload.description,
+    payload.category,
+    payload.locationName,
+    ...(payload.aiTags || []),
+    ...(payload.semanticTags || [])
+  ].join(' ').toLowerCase();
+}
+
+function compactLocationName(name = '') {
+  const text = String(name);
+  if (!text) return '';
+  if (/餐厅|食堂|dining/i.test(text)) return '餐厅附近';
+  if (/图书馆|library/i.test(text)) return '图书馆附近';
+  if (/宿舍|公寓/i.test(text)) return '宿舍附近';
+  if (/体育|运动/i.test(text)) return '体育馆附近';
+  if (/学院|教学楼|中心|研究所|校门/i.test(text)) return `${text.replace(/（.*?）/g, '')}附近`;
+  return `${text}附近`;
+}
+
+function formatTimeGap(leftTime, rightTime) {
+  const left = new Date(leftTime).getTime();
+  const right = new Date(rightTime).getTime();
+  if (!left || !right) return '';
+  const diff = Math.abs(left - right);
+  const hour = 60 * 60 * 1000;
+  const day = 24 * hour;
+  if (diff <= 2 * hour) return '发布时间接近';
+  if (diff <= day) return '发布时间接近';
+  if (diff <= 7 * day) return '发布时间接近';
+  return '';
+}
+
+function buildHumanReasons(query = {}, candidate = {}, queryFeatures = {}, candidateFeatures = {}) {
+  const reasons = [];
+  const queryText = getFeatureText(query);
+  const candidateText = getFeatureText(candidate);
+  const colors = sharedValues(queryFeatures.colors, candidateFeatures.colors);
+  const accessories = sharedValues(queryFeatures.accessories, candidateFeatures.accessories);
+  const shapes = sharedValues(queryFeatures.shapes, candidateFeatures.shapes);
+
+  if (queryFeatures.category && queryFeatures.category === candidateFeatures.category) {
+    const color = colors[0] || '';
+    reasons.push(`同为${color}${queryFeatures.category}`);
+  }
+
+  const accessoryReason = accessories.find((accessory) => {
+    return colors.some((color) => queryText.includes(`${color}${accessory}`) && candidateText.includes(`${color}${accessory}`));
+  });
+  if (accessoryReason) {
+    const color = colors.find((entry) => queryText.includes(`${entry}${accessoryReason}`) && candidateText.includes(`${entry}${accessoryReason}`));
+    reasons.push(`${color}${accessoryReason}`);
+  } else if (accessories.length) {
+    reasons.push(accessories.slice(0, 2).join('、'));
+  }
+
+  if (query.locationId && candidate.locationId && query.locationId === candidate.locationId) {
+    reasons.push(compactLocationName(candidate.locationName || query.locationName));
+  } else if (query.locationName && candidate.locationName) {
+    const queryLocation = compactLocationName(query.locationName);
+    const candidateLocation = compactLocationName(candidate.locationName);
+    if (queryLocation && queryLocation === candidateLocation) reasons.push(candidateLocation);
+  }
+
+  const timeReason = formatTimeGap(query.createdAt, candidate.createdAt);
+  if (timeReason) reasons.push(timeReason);
+
+  if (shapes.length && reasons.length < 4) {
+    reasons.push(`${shapes.slice(0, 2).join('、')}外观相似`);
+  }
+
+  if (!reasons.length) {
+    const sharedTags = sharedValues(queryFeatures.signature, candidateFeatures.signature)
+      .filter((tag) => tag !== queryFeatures.category)
+      .slice(0, 2);
+    if (sharedTags.length) reasons.push(`标签相似：${sharedTags.join('、')}`);
+  }
+
+  return uniq(reasons).slice(0, 4);
+}
+
 function scoreFeatureMatch(query = {}, candidate = {}) {
   const queryFeatures = query.matchFeatures || extractItemFeatures(query);
   const candidateFeatures = candidate.matchFeatures || extractItemFeatures(candidate);
   let score = 0;
-  const reasons = [];
 
   if (queryFeatures.category && queryFeatures.category === candidateFeatures.category) {
     score += 28;
-    reasons.push(`同为${queryFeatures.category}`);
   }
 
   const colorHits = sharedCount(queryFeatures.colors, candidateFeatures.colors);
   if (colorHits) {
     score += Math.min(colorHits * 14, 22);
-    reasons.push(`颜色匹配：${queryFeatures.colors.filter((word) => candidateFeatures.colors.includes(word)).join('、')}`);
   }
 
   const accessoryHits = sharedCount(queryFeatures.accessories, candidateFeatures.accessories);
   if (accessoryHits) {
     score += Math.min(accessoryHits * 22, 28);
-    reasons.push(`细节匹配：${queryFeatures.accessories.filter((word) => candidateFeatures.accessories.includes(word)).join('、')}`);
   }
 
   const shapeHits = sharedCount(queryFeatures.shapes, candidateFeatures.shapes);
   if (shapeHits) {
     score += Math.min(shapeHits * 10, 16);
-    reasons.push(`外观匹配：${queryFeatures.shapes.filter((word) => candidateFeatures.shapes.includes(word)).join('、')}`);
   }
 
   const semanticHits = sharedCount(queryFeatures.signature, candidateFeatures.signature);
@@ -105,17 +188,15 @@ function scoreFeatureMatch(query = {}, candidate = {}) {
 
   if (query.locationId && candidate.locationId && query.locationId === candidate.locationId) {
     score += 10;
-    reasons.push('地点一致');
   }
 
   if (queryFeatures.imageFingerprint && candidateFeatures.imageFingerprint) {
     score += 8;
-    reasons.push('双方都有图片，可进一步做图像相似度');
   }
 
   return {
     similarity: Math.min(score, 99),
-    reasons: reasons.slice(0, 3),
+    reasons: buildHumanReasons(query, candidate, queryFeatures, candidateFeatures),
     queryFeatures,
     candidateFeatures
   };

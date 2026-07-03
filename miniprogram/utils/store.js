@@ -477,6 +477,8 @@ function scoreItemMatch(lostPayload, foundItem) {
     }
   }
 
+  if (featureScore.reasons.includes('发布时间接近')) score += 4;
+
   return {
     similarity: Math.min(score, 98),
     reasons: featureScore.reasons
@@ -494,7 +496,7 @@ function findPotentialMatches(payload, limit = 3) {
         ...item,
         similarity: result.similarity,
         matchReasons: result.reasons,
-        matchReasonText: result.reasons.join('，')
+        matchReasonText: result.reasons.join(' / ')
       };
     })
     .filter((item) => item.similarity >= 58)

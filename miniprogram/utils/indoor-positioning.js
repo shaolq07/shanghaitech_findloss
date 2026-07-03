@@ -12,6 +12,19 @@ function safeCall(fn) {
   return typeof fn === 'function';
 }
 
+function distanceMeters(a, b) {
+  if (!a || !b || !a.latitude || !a.longitude || !b.latitude || !b.longitude) return 9999;
+  const toRad = (value) => (Number(value) * Math.PI) / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLng = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
 function collectWifiSignals() {
   return new Promise((resolve) => {
     if (!safeCall(wx.startWifi)) {
@@ -177,13 +190,19 @@ function matchBle(fingerprint = {}, ble = {}) {
 function scoreIndoorSignals(location, signals = {}) {
   const fingerprint = INDOOR_FINGERPRINTS[location._id];
   const tencentData = signals.tencentIndoor && signals.tencentIndoor.ok ? signals.tencentIndoor.data || {} : {};
+  const tencentDistance = tencentData.latitude && tencentData.longitude
+    ? Math.round(distanceMeters(location, tencentData))
+    : 9999;
+  const tencentAccuracy = Number(tencentData.accuracy) || 80;
   const tencentMatched = tencentData.locationId === location._id
     || (tencentData.building && normalize(location.name).includes(normalize(tencentData.building)))
-    || (tencentData.building && normalize(location.aliases || []).includes(normalize(tencentData.building)));
+    || (tencentData.building && normalize(location.aliases || []).includes(normalize(tencentData.building)))
+    || tencentDistance <= Math.max(80, tencentAccuracy);
   if (!fingerprint && !tencentMatched) return { score: 0, reasons: [], indoor: null };
   const wifiScore = fingerprint ? matchWifi(fingerprint, signals.wifi) : 0;
   const bleScore = fingerprint ? matchBle(fingerprint, signals.ble) : 0;
-  const tencentScore = tencentMatched ? 44 + Math.round(Number(tencentData.confidence || 0) * 20) : 0;
+  const tencentDistanceBoost = tencentDistance < 9999 ? Math.max(0, 18 - Math.round(tencentDistance / 8)) : 0;
+  const tencentScore = tencentMatched ? 34 + tencentDistanceBoost + Math.round(Number(tencentData.confidence || 0) * 20) : 0;
   const reasons = [];
   if (wifiScore) reasons.push('Wi-Fi 指纹匹配');
   if (bleScore) reasons.push('BLE 信标匹配');
@@ -249,8 +268,42 @@ function compactBle(ble = {}) {
   };
 }
 
+function requestTencentIndoorViaHttp(endpoint, gps, wifi, ble) {
+  return new Promise((resolve) => {
+    wx.request({
+      url: endpoint,
+      method: 'POST',
+      header: {
+        'content-type': 'application/json'
+      },
+      data: {
+        gps: gps || null,
+        coordType: 'gcj02',
+        wifi: compactWifi(wifi),
+        ble: compactBle(ble)
+      },
+      success: (res) => {
+        const body = res.data || {};
+        if (res.statusCode < 200 || res.statusCode >= 300 || body.ok === false) {
+          resolve({ ok: false, reason: body.message || body.error || `HTTP ${res.statusCode}` });
+          return;
+        }
+        resolve({ ok: true, data: body.data || body });
+      },
+      fail: (error) => resolve({
+        ok: false,
+        reason: (error && (error.errMsg || error.message)) || 'Tencent indoor positioning API unavailable'
+      })
+    });
+  });
+}
+
 function resolveTencentIndoor(gps, wifi, ble) {
   const app = typeof getApp === 'function' ? getApp() : null;
+  const endpoint = app && app.globalData && app.globalData.indoorApiUrl;
+  if (endpoint) {
+    return requestTencentIndoorViaHttp(endpoint, gps, wifi, ble);
+  }
   if (!app || !app.globalData || !app.globalData.cloudReady || !wx.cloud) {
     return Promise.resolve({ ok: false, reason: '云开发未启用，跳过腾讯室内定位' });
   }

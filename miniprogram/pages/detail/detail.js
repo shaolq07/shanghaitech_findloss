@@ -1,6 +1,7 @@
 const {
   login,
   getItemDetail,
+  findPotentialMatches,
   createComment,
   sendThanks,
   markReturned,
@@ -19,6 +20,9 @@ Page({
     hasMapPoint: false,
     mapMarkers: [],
     mapScale: 20,
+    potentialMatches: [],
+    hasPotentialMatches: false,
+    noPotentialMatches: true,
     comments: [],
     commentText: '',
     isMine: false,
@@ -43,6 +47,7 @@ Page({
     const isMine = item ? item.ownerOpenid === user.openid : false;
     const hasMapPoint = Boolean(item && item.latitude && item.longitude);
     const comments = detail.comments || [];
+    const potentialMatches = item && item.type === 'lost' ? findPotentialMatches(item, 4) : [];
     this.setData({
       item,
       itemTypeText: item && item.type === 'lost' ? '寻物' : '招领',
@@ -68,6 +73,9 @@ Page({
         }
       }] : [],
       mapScale: item && item.locationId === 'library' ? 20 : 19,
+      potentialMatches,
+      hasPotentialMatches: potentialMatches.length > 0,
+      noPotentialMatches: potentialMatches.length === 0,
       comments,
       isMine,
       canMarkReturned: Boolean(item && item.status === 'active' && isMine),
@@ -128,5 +136,9 @@ Page({
   reportItem() {
     reportContent('item', this.data.id, '用户从详情页举报');
     wx.showToast({ title: '已收到举报', icon: 'success' });
+  },
+
+  goMatchDetail(event) {
+    wx.navigateTo({ url: `/pages/detail/detail?id=${event.currentTarget.dataset.id}` });
   }
 });

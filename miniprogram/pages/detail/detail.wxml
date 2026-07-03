@@ -19,6 +19,50 @@
     </view>
   </view>
 
+  <view class="ai-match-card" wx:if="{{item.type === 'lost'}}">
+    <view class="ai-match-head">
+      <view>
+        <text class="ai-match-eyebrow">AI 匹配结果</text>
+        <text class="ai-match-title">可能是这几件</text>
+      </view>
+      <text class="ai-match-count">{{potentialMatches.length}} 条</text>
+    </view>
+    <text class="ai-match-copy">根据图片特征、语义标签、校内地点和发布时间自动筛选历史招领。</text>
+
+    <view wx:if="{{noPotentialMatches}}" class="ai-match-empty">
+      暂时没有高相似招领，系统会继续保留标签用于后续匹配。
+    </view>
+
+    <view
+      wx:for="{{potentialMatches}}"
+      wx:key="_id"
+      wx:for-item="match"
+      class="ai-match-item"
+      bindtap="goMatchDetail"
+      data-id="{{match._id}}"
+    >
+      <view class="match-thumb">
+        <image wx:if="{{match.thumbUrl}}" src="{{match.thumbUrl}}" mode="aspectFill" />
+        <text wx:else>{{match.category}}</text>
+      </view>
+      <view class="match-body">
+        <view class="match-row">
+          <text class="match-name">{{match.title}}</text>
+          <text class="match-score">{{match.similarity}}%</text>
+        </view>
+        <text class="match-meta">{{match.locationName}} · {{match.category}}</text>
+        <view class="match-reasons">
+          <text
+            wx:for="{{match.matchReasons}}"
+            wx:key="*this"
+            wx:for-item="reason"
+            class="reason-pill"
+          >{{reason}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
   <view class="card location-card" wx:if="{{item.locationName}}">
     <view class="location-heading">
       <view>

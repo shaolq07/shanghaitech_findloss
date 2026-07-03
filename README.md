@@ -125,19 +125,50 @@ TENCENT_INDOOR_CAMPUS_ID=shanghaitech
 
 ## 接入腾讯云混元图像识别
 
-当前分支已改为云函数直接调用腾讯云混元多模态模型：图片上传到云存储后，云函数获取临时图片链接，调用混元视觉模型生成图片 tags。小程序端不直接保存 API key。
+当前分支支持两种图片识别方式：
+
+1. 在 `miniprogram/app.js` 配置 `MODEL_API_URL` 后，小程序会直接调用普通 HTTPS 模型接口，不需要微信云开发。
+2. 未配置 `MODEL_API_URL` 时，才使用云函数调用腾讯云混元多模态模型。
+
+不建议把模型 API Key 直接写入小程序前端。更安全的做法是把 OpenAI、Gemini、通义、混元等 API Key 放在你的 HTTPS 模型代理接口服务端。
+
+HTTP 模型接口入参：
+
+```json
+{
+  "imageBase64": "图片 base64",
+  "mimeType": "image/jpeg",
+  "hint": "用户填写的标题、描述、分类和已有标签"
+}
+```
+
+HTTP 模型接口返回：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "category": "雨伞",
+    "aiTags": ["雨伞", "黑色", "折叠", "红色钥匙扣"],
+    "semanticTags": ["雨伞", "折叠", "红色钥匙扣"],
+    "visualDescription": "黑色折叠雨伞，伞柄处有红色钥匙扣。",
+    "yoloObjects": []
+  }
+}
+```
 
 需要配置云函数环境变量：
 
 ```text
 HUNYUAN_API_KEY=腾讯云混元 API Key
+# 兼容旧变量名：TENCENTCLOUD_API_KEY
 HUNYUAN_MODEL=hunyuan-vision
 HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1
 ```
 
 说明：
 
-- `HUNYUAN_API_KEY`：在腾讯云混元控制台/API Key 管理页面获取。
+- `HUNYUAN_API_KEY`：在腾讯云混元控制台/API Key 管理页面获取；旧配置名 `TENCENTCLOUD_API_KEY` 也会被云函数兼容读取。
 - `HUNYUAN_MODEL`：可按腾讯云控制台支持的视觉模型名称调整。
 - `HUNYUAN_BASE_URL`：默认使用腾讯云混元 OpenAI 兼容接口，一般不用改。
 - 不再需要 `YOLO_API_URL`、`SEMANTIC_API_URL` 或自建 `model-service`。
@@ -200,7 +231,7 @@ HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1
 
 ## 已知限制
 
-- 图像识别依赖腾讯云混元 API，未配置 `HUNYUAN_API_KEY` 时会返回 `MODEL_NOT_CONFIGURED`。
+- 图像识别依赖腾讯云混元 API，未配置 `HUNYUAN_API_KEY` 或 `TENCENTCLOUD_API_KEY` 时会返回 `MODEL_NOT_CONFIGURED`。
 - 本地 mock 数据只存在于微信开发者工具本地缓存中。
 - 邮箱字段已保存，但邮件通知尚未接入实际发送服务。
 - 正式上线前需要配置真实 AppID、云开发环境和隐私接口声明。

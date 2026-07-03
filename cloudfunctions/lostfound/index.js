@@ -30,7 +30,11 @@ const CATEGORY_KEYWORDS = {
 const BAD_WORDS = ['辱骂', '广告', '诈骗', '加群'];
 
 const HUNYUAN_CONFIG = {
-  apiKey: process.env.HUNYUAN_API_KEY || process.env.MODEL_API_KEY || '',
+  apiKey: process.env.HUNYUAN_API_KEY
+    || process.env.TENCENTCLOUD_API_KEY
+    || process.env.TENCENT_HUNYUAN_API_KEY
+    || process.env.MODEL_API_KEY
+    || '',
   baseUrl: (process.env.HUNYUAN_BASE_URL || 'https://api.hunyuan.cloud.tencent.com/v1').replace(/\/$/, ''),
   model: process.env.HUNYUAN_MODEL || 'hunyuan-vision'
 };
@@ -90,6 +94,13 @@ function normalizeHunyuanResult(result = {}) {
     imageEmbedding: result.imageEmbedding || result.image_embedding || [],
     semanticEmbedding: result.semanticEmbedding || result.semantic_embedding || result.embedding || []
   };
+}
+
+function normalizeImageBase64(imageBase64 = '', mimeType = 'image/jpeg') {
+  const value = String(imageBase64 || '').trim();
+  if (!value) return '';
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value)) return value;
+  return `data:${mimeType || 'image/jpeg'};base64,${value.replace(/^data:[^,]+,/, '')}`;
 }
 
 async function callHunyuanVision(payload) {
@@ -193,13 +204,16 @@ async function listLocations(event) {
 
 async function classifyImage(event) {
   if (!HUNYUAN_CONFIG.apiKey) {
-    return fail('请先配置 HUNYUAN_API_KEY', 'MODEL_NOT_CONFIGURED');
+    return fail('请先配置 HUNYUAN_API_KEY 或 TENCENTCLOUD_API_KEY', 'MODEL_NOT_CONFIGURED');
   }
-  if (!event.fileId && !event.imageUrl) {
-    return fail('缺少图片 fileId 或 imageUrl');
+  if (!event.fileId && !event.imageUrl && !event.imageBase64) {
+    return fail('缺少图片 fileId、imageUrl 或 imageBase64');
   }
 
   let imageUrl = event.imageUrl || '';
+  if (!imageUrl && event.imageBase64) {
+    imageUrl = normalizeImageBase64(event.imageBase64, event.mimeType || event.contentType || 'image/jpeg');
+  }
   if (!imageUrl && event.fileId) {
     const tempResult = await cloud.getTempFileURL({ fileList: [event.fileId] });
     const file = tempResult.fileList && tempResult.fileList[0];
