@@ -27,7 +27,13 @@ function isCloudFile(filePath = '') {
 
 function getErrorMessage(error, fallback = '请检查云开发配置') {
   const message = error && (error.message || error.errMsg || error.messageText || (error.result && error.result.message));
-  return String(message || fallback).replace(/\s+/g, ' ').slice(0, 90);
+  const errCode = error && (error.errCode || error.errcode || (error.result && (error.result.errCode || error.result.errcode)));
+  const requestId = error && (error.callID || error.requestID || error.requestId);
+  return [
+    errCode ? `errCode: ${errCode}` : '',
+    String(message || fallback),
+    requestId ? `callId: ${requestId}` : ''
+  ].filter(Boolean).join(' | ').replace(/\s+/g, ' ').slice(0, 180);
 }
 
 function isCloudPermissionError(error) {
@@ -739,13 +745,14 @@ Page({
         }));
       },
       fail: (error) => {
+        console.error('[lostfound] cloud classifyImage failed', error);
         this.setData({
           classifying: false,
           modelError: getRecognitionErrorText(error, '云函数调用失败'),
           aiProcessStage: 'error',
           aiProcessSteps: buildAiProcessSteps('error', '', this.data.form.type)
         });
-        if (!options.silentFail) wx.showToast({ title: '云函数调用失败', icon: 'none' });
+        if (!options.silentFail) wx.showToast({ title: '查看红色错误详情', icon: 'none' });
       }
     });
   },
