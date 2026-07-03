@@ -18,8 +18,8 @@ const INDOOR_API_URL = '';
 Configure these variables in the WeChat DevTools CloudBase console for `cloudfunctions/lostfound`.
 
 ```env
-TENCENTCLOUD_SECRET_ID=your-secret-id
-TENCENTCLOUD_SECRET_KEY=your-secret-key
+TENCENT_SECRET_ID=your-secret-id
+TENCENT_SECRET_KEY=your-secret-key
 HUNYUAN_MODEL=hunyuan-vision
 TENCENT_HUNYUAN_ENDPOINT=https://hunyuan.tencentcloudapi.com
 

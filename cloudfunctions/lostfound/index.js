@@ -475,7 +475,7 @@ async function listLocations(event) {
 
 async function classifyImage(event) {
   if (!HUNYUAN_CONFIG.apiKey && !(HUNYUAN_CONFIG.secretId && HUNYUAN_CONFIG.secretKey)) {
-    return fail('请先配置 HUNYUAN_API_KEY 或 TENCENTCLOUD_SECRET_ID/TENCENTCLOUD_SECRET_KEY', 'MODEL_NOT_CONFIGURED');
+    return fail('请先配置 HUNYUAN_API_KEY 或 TENCENT_SECRET_ID/TENCENT_SECRET_KEY', 'MODEL_NOT_CONFIGURED');
   }
   if (!event.fileId && !event.imageUrl && !event.imageBase64) {
     return fail('缺少图片 fileId、imageUrl 或 imageBase64');
