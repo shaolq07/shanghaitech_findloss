@@ -46,4 +46,23 @@ If both Tencent Cloud `SecretId/SecretKey` and `HUNYUAN_API_KEY` exist, the clou
 4. Choose `Upload and deploy: cloud install dependencies`.
 5. Recompile the mini program and test image recognition plus indoor positioning.
 
+## Timeout
+
+Image recognition calls can take more than the CloudBase default 3 seconds. The project includes:
+
+```text
+cloudfunctions/lostfound/config.json
+```
+
+with:
+
+```json
+{
+  "timeout": 30,
+  "memorySize": 512
+}
+```
+
+If the CloudBase console still reports `FUNCTIONS_TIME_LIMIT_EXCEEDED`, open `lostfound` in the CloudBase console and set the function timeout to 30 seconds manually, then deploy again.
+
 Do not commit real API keys. Keep them only in CloudBase environment variables.
