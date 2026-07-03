@@ -1,8 +1,8 @@
 const { ensureSeedData, isRegistered } = require('./utils/store');
 
-const CLOUD_ENV = 'skd-d2gvbeo5c6227bf73';
-const MODEL_API_URL = 'http://127.0.0.1:8787/lostfound-vision';
-const INDOOR_API_URL = 'http://127.0.0.1:8787/indoor-location';
+const CLOUD_ENV = 'cloud1-d9gnyuxf5b44b6b92';
+const MODEL_API_URL = '';
+const INDOOR_API_URL = '';
 
 App({
   globalData: {
