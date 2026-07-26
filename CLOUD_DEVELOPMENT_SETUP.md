@@ -21,6 +21,9 @@ TENCENT_SECRET_ID=your-secret-id
 TENCENT_SECRET_KEY=your-secret-key
 HUNYUAN_MODEL=hunyuan-vision
 TENCENT_HUNYUAN_ENDPOINT=https://hunyuan.tencentcloudapi.com
+QQ_REVIEW_GROUP_IDS=731332881
+QQ_INGEST_TOKEN=generate-a-long-random-secret
+QQ_REVIEW_ADMIN_TOKEN=generate-a-different-long-random-secret
 ```
 
 Optional OpenAI-compatible Hunyuan mode:
@@ -40,6 +43,26 @@ If both Tencent Cloud `SecretId/SecretKey` and `HUNYUAN_API_KEY` exist, the clou
 3. Right-click `cloudfunctions/lostfound`.
 4. Choose `Upload and deploy: cloud install dependencies`.
 5. Recompile the mini program and test image recognition.
+
+## QQ review queue
+
+Create a private collection named `qq_review_queue`. It must not allow direct client reads or writes; all access goes through the `lostfound` cloud function.
+
+After deploying the event function, create an HTTP access-service route that points `/qq-ingest` to `lostfound`:
+
+```powershell
+tcb service create -p qq-ingest -f lostfound -e cloud1-d9gnyuxf5b44b6b92
+```
+
+The local QQ archive process posts only production group `731332881` to this route. Set its `QQ_CLOUD_INGEST_URL` and `QQ_CLOUD_INGEST_TOKEN` process variables as documented in `qq-archive/README.md`.
+
+The moderation page is:
+
+```text
+https://lockmyitem.asia/review
+```
+
+Enter `QQ_REVIEW_ADMIN_TOKEN` there. The token is kept in browser `sessionStorage`, so closing the tab session clears it. Queue records stay `pending` until an administrator approves or rejects them. Approval creates a public item with cloud-storage image file IDs; rejection never creates a public item.
 
 ## Timeout
 

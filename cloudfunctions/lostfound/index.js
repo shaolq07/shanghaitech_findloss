@@ -1,6 +1,19 @@
 const cloud = require('wx-server-sdk');
 const fetch = require('node-fetch');
 const crypto = require('crypto');
+const {
+  createRateLimiter,
+  resolveCallerId,
+  toPublicRecord,
+  validateVisionInput
+} = require('./security');
+const {
+  normalizeIncomingRecord,
+  parseCsv,
+  reviewId,
+  safeEqual,
+  sanitizeDraft
+} = require('./qq-review');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
@@ -14,7 +27,8 @@ const COLLECTIONS = {
   thanks: 'thanks',
   notifications: 'notifications',
   reports: 'reports',
-  locations: 'campus_locations'
+  locations: 'campus_locations',
+  qqReviewQueue: 'qq_review_queue'
 };
 
 const CATEGORY_KEYWORDS = {
@@ -29,6 +43,29 @@ const CATEGORY_KEYWORDS = {
 };
 
 const BAD_WORDS = ['辱骂', '广告', '诈骗', '加群'];
+const AUTH_REQUIRED_ACTIONS = new Set([
+  'login',
+  'createItem',
+  'classifyImage',
+  'createComment',
+  'sendThanks',
+  'markReturned',
+  'undoReturned',
+  'reportContent'
+]);
+const visionRateLimiter = createRateLimiter({
+  limit: Number(process.env.VISION_RATE_LIMIT || 8),
+  windowMs: Number(process.env.VISION_RATE_WINDOW_MS || 60_000)
+});
+const QQ_REVIEW_CONFIG = {
+  allowedGroupIds: parseCsv(process.env.QQ_REVIEW_GROUP_IDS),
+  ingestToken: process.env.QQ_INGEST_TOKEN || '',
+  adminToken: process.env.QQ_REVIEW_ADMIN_TOKEN || '',
+  maxImageBytes: Math.min(
+    Number(process.env.QQ_REVIEW_MAX_IMAGE_BYTES || 8 * 1024 * 1024),
+    10 * 1024 * 1024
+  )
+};
 
 const HUNYUAN_CONFIG = {
   apiKey: process.env.HUNYUAN_API_KEY
@@ -52,6 +89,16 @@ function optionalNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function clampInteger(value, fallback, min, max) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function ok(data = {}) {
   return { ok: true, data };
 }
@@ -62,6 +109,46 @@ function fail(message, code = 'BAD_REQUEST') {
 
 function now() {
   return db.serverDate();
+}
+
+function headerValue(headers = {}, name) {
+  const key = Object.keys(headers).find((entry) => entry.toLowerCase() === name.toLowerCase());
+  return key ? String(headers[key] || '') : '';
+}
+
+function parseRuntimeEvent(event = {}) {
+  if (!event || typeof event !== 'object' || !event.body) return event || {};
+  let body = event.body;
+  if (event.isBase64Encoded && typeof body === 'string') {
+    body = Buffer.from(body, 'base64').toString('utf8');
+  }
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return event;
+    }
+  }
+  if (!body || typeof body !== 'object') return event;
+  return {
+    ...event,
+    ...body,
+    __headers: event.headers || {}
+  };
+}
+
+function requireConfiguredToken(configuredToken, requestToken, missingMessage) {
+  if (!configuredToken) return fail(missingMessage, 'NOT_CONFIGURED');
+  if (!requestToken || !safeEqual(configuredToken, requestToken)) {
+    return fail('凭据无效', 'FORBIDDEN');
+  }
+  return null;
+}
+
+function bearerToken(request) {
+  const authorization = headerValue(request.__headers, 'authorization');
+  if (/^Bearer\s+/i.test(authorization)) return authorization.replace(/^Bearer\s+/i, '').trim();
+  return String(request.ingestToken || request.adminToken || '').trim();
 }
 
 function classifyByText(text = '') {
@@ -291,11 +378,24 @@ function mapTagsToCategory(tags = [], hint = '') {
 async function ensureUser(openid, profile = {}) {
   const userResult = await db.collection(COLLECTIONS.users).where({ _openid: openid }).limit(1).get();
   if (userResult.data.length) {
-    return userResult.data[0];
+    const existing = userResult.data[0];
+    const patch = {};
+    if (profile.nickName && profile.nickName !== existing.nickName) patch.nickName = profile.nickName;
+    if (profile.avatarUrl && profile.avatarUrl !== existing.avatarUrl) patch.avatarUrl = profile.avatarUrl;
+    if (profile.email && profile.email !== existing.email) patch.email = profile.email;
+    if (profile.contact && profile.contact !== existing.contact) patch.contact = profile.contact;
+    if (Object.keys(patch).length) {
+      patch.updatedAt = now();
+      await db.collection(COLLECTIONS.users).doc(existing._id).update({ data: patch });
+      return { ...existing, ...patch };
+    }
+    return existing;
   }
   const user = {
     nickName: profile.nickName || '微信用户',
     avatarUrl: profile.avatarUrl || '',
+    email: profile.email || '',
+    contact: profile.contact || profile.email || '',
     createdAt: now(),
     updatedAt: now()
   };
@@ -323,22 +423,27 @@ async function login(event, context) {
 }
 
 async function listLocations(event) {
-  const keyword = (event.keyword || '').trim();
+  const keyword = String(event.keyword || '').trim().slice(0, 50);
   const query = { enabled: true };
   if (keyword) {
-    query.name = db.RegExp({ regexp: keyword, options: 'i' });
+    query.name = db.RegExp({ regexp: escapeRegExp(keyword), options: 'i' });
   }
   const result = await db.collection(COLLECTIONS.locations).where(query).orderBy('sortOrder', 'asc').get();
   return ok(result.data);
 }
 
-async function classifyImage(event) {
+async function classifyImage(event, callerId) {
   if (!HUNYUAN_CONFIG.apiKey && !(HUNYUAN_CONFIG.secretId && HUNYUAN_CONFIG.secretKey)) {
     return fail('请先配置 HUNYUAN_API_KEY 或 TENCENT_SECRET_ID/TENCENT_SECRET_KEY', 'MODEL_NOT_CONFIGURED');
   }
+  if (!callerId) return fail('请先登录后再使用 AI 图片识别', 'UNAUTHENTICATED');
   if (!event.fileId && !event.imageUrl && !event.imageBase64) {
     return fail('缺少图片 fileId、imageUrl 或 imageBase64');
   }
+  const validation = validateVisionInput(event);
+  if (!validation.ok) return fail(validation.message, validation.code);
+  const rate = visionRateLimiter.check(callerId);
+  if (!rate.allowed) return fail('AI 识别请求过于频繁，请稍后再试', 'RATE_LIMITED');
 
   let imageUrl = normalizeImageUrl(event.imageUrl || '');
   if (!imageUrl && event.imageBase64) {
@@ -391,16 +496,23 @@ async function classifyImage(event) {
 async function createItem(event, context) {
   const payload = event.payload || {};
   if (!(payload.imageUrls || []).length && !payload.category) return fail('请上传图片或选择分类');
+  if (String(payload.title || '').length > 80) return fail('物品标题不能超过 80 个字符');
+  if (String(payload.description || '').length > 1000) return fail('物品描述不能超过 1000 个字符');
   let location = null;
   if (payload.locationId) {
-    const locationResult = await db.collection(COLLECTIONS.locations).doc(payload.locationId).get();
-    location = locationResult.data;
+    try {
+      const locationResult = await db.collection(COLLECTIONS.locations).doc(payload.locationId).get();
+      if (locationResult.data) location = locationResult.data;
+    } catch (error) {
+      // Web 端可能使用本地地点 id；查不到时退回名称与区域字段。
+      location = null;
+    }
   }
   const customLatitude = optionalNumber(payload.latitude);
   const customLongitude = optionalNumber(payload.longitude);
   const hasCustomLocation = !location && (payload.locationName || (customLatitude && customLongitude));
   const classification = payload.category
-    ? { category: payload.category, aiTags: payload.aiTags || [] }
+    ? { category: payload.category, aiTags: payload.aiTags || payload.tags || [] }
     : classifyByText(`${payload.title} ${payload.description || ''}`);
   const title = (payload.title || '').trim() || classification.category || '未命名物品';
   const data = {
@@ -416,11 +528,11 @@ async function createItem(event, context) {
     semanticTags: payload.semanticTags || [],
     imageEmbedding: payload.imageEmbedding || [],
     semanticEmbedding: payload.semanticEmbedding || [],
-    locationId: location ? location._id : '',
+    locationId: location ? location._id : (payload.locationId || ''),
     locationName: location ? location.name : (payload.locationName || ''),
     locationArea: location ? location.area : (payload.locationArea || (hasCustomLocation ? '自定义位置' : '')),
     locationNearby: location ? location.nearby || [] : [],
-    locationGuide: location ? location.detail || '' : '',
+    locationGuide: location ? location.detail || '' : (payload.locationGuide || ''),
     locationDetail: payload.locationDetail || '',
     mapX: location ? location.mapX : optionalNumber(payload.mapX),
     mapY: location ? location.mapY : optionalNumber(payload.mapY),
@@ -429,26 +541,38 @@ async function createItem(event, context) {
     status: 'active',
     ownerOpenid: context.OPENID,
     ownerName: payload.ownerName || '微信用户',
+    ownerContact: payload.ownerContact || '',
     createdAt: now(),
     updatedAt: now()
   };
   const created = await db.collection(COLLECTIONS.items).add({ data });
-  return ok({ _id: created._id, ...data });
+  return ok(toPublicRecord({ _id: created._id, ...data }, context.OPENID));
 }
 
 async function listItems(event) {
   const filters = event.filters || {};
-  const query = { status: filters.status || 'active' };
+  const cursor = clampInteger(filters.cursor, 0, 0, 100_000);
+  const limit = clampInteger(filters.limit, 20, 1, 50);
+  const query = {};
+  if (filters.status && filters.status !== 'all') {
+    query.status = filters.status;
+  } else if (!filters.status) {
+    query.status = 'active';
+  }
   if (filters.type) query.type = filters.type;
   if (filters.category && filters.category !== '全部') query.category = filters.category;
   if (filters.locationId) query.locationId = filters.locationId;
   const result = await db.collection(COLLECTIONS.items)
     .where(query)
     .orderBy('createdAt', 'desc')
-    .skip(filters.cursor || 0)
-    .limit(filters.limit || 20)
+    .skip(cursor)
+    .limit(limit)
     .get();
-  return ok({ items: result.data, nextCursor: (filters.cursor || 0) + result.data.length });
+  const callerId = event.__callerId || '';
+  return ok({
+    items: result.data.map((item) => toPublicRecord(item, callerId)),
+    nextCursor: cursor + result.data.length
+  });
 }
 
 async function getItemDetail(event) {
@@ -457,12 +581,17 @@ async function getItemDetail(event) {
     .where({ itemId: event.itemId, status: 'active' })
     .orderBy('createdAt', 'asc')
     .get();
-  return ok({ item: item.data, comments: comments.data });
+  const callerId = event.__callerId || '';
+  return ok({
+    item: toPublicRecord(item.data, callerId),
+    comments: comments.data.map((comment) => toPublicRecord(comment, callerId))
+  });
 }
 
 async function createComment(event, context) {
   const content = (event.content || '').trim();
   if (!content) return fail('评论不能为空');
+  if (content.length > 500) return fail('评论不能超过 500 个字符');
   if (BAD_WORDS.some((word) => content.includes(word))) return fail('评论包含敏感词');
   const itemResult = await db.collection(COLLECTIONS.items).doc(event.itemId).get();
   const item = itemResult.data;
@@ -528,36 +657,257 @@ async function reportContent(event, context) {
   return ok({ _id: created._id, ...data });
 }
 
-exports.main = async (event) => {
-  const context = cloud.getWXContext();
+function decodeReviewImage(media) {
+  const base64 = String(media?.base64 || '').replace(/^data:[^,]+,/, '');
+  if (!base64) throw new Error('图片数据为空');
+  const fileContent = Buffer.from(base64, 'base64');
+  if (!fileContent.length || fileContent.length > QQ_REVIEW_CONFIG.maxImageBytes) {
+    throw new Error('图片为空或超过云端单图大小限制');
+  }
+  const contentType = String(media.contentType || 'image/jpeg').toLowerCase();
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType)) {
+    throw new Error('图片格式不受支持');
+  }
+  if (media.sha256 && !safeEqual(String(media.sha256).toLowerCase(), sha256(fileContent))) {
+    throw new Error('图片校验失败');
+  }
+  return { fileContent, contentType };
+}
+
+function extensionForContentType(contentType) {
+  return {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  }[contentType] || 'jpg';
+}
+
+async function uploadQQReviewImages(queueId, mediaList = []) {
+  const uploaded = [];
+  for (const media of mediaList.slice(0, 4)) {
+    const { fileContent, contentType } = decodeReviewImage(media);
+    const digest = sha256(fileContent);
+    const extension = extensionForContentType(contentType);
+    const cloudPath = `qq-review/${queueId}/${digest.slice(0, 24)}.${extension}`;
+    const result = await cloud.uploadFile({ cloudPath, fileContent });
+    uploaded.push({
+      fileId: result.fileID || result.fileId || '',
+      contentType,
+      bytes: fileContent.length,
+      sha256: digest,
+      originalFile: String(media.originalFile || '').slice(0, 180)
+    });
+  }
+  return uploaded;
+}
+
+async function ingestQQMessage(event) {
+  const tokenError = requireConfiguredToken(
+    QQ_REVIEW_CONFIG.ingestToken,
+    bearerToken(event),
+    '请先在云函数环境变量中配置 QQ_INGEST_TOKEN'
+  );
+  if (tokenError) return tokenError;
+
+  let normalized;
   try {
-    switch (event.action) {
+    normalized = normalizeIncomingRecord(event.record || {});
+  } catch (error) {
+    return fail(error.message, 'INVALID_QQ_RECORD');
+  }
+  if (!QQ_REVIEW_CONFIG.allowedGroupIds.has(normalized.groupId)) {
+    return fail('群号不在云端审核白名单中', 'GROUP_NOT_ALLOWED');
+  }
+
+  const queueId = reviewId(normalized.groupId, normalized.messageId);
+  try {
+    const existing = await db.collection(COLLECTIONS.qqReviewQueue).doc(queueId).get();
+    if (existing?.data) {
+      return ok({ queueId, duplicate: true, status: existing.data.status });
+    }
+  } catch {
+    // A missing deterministic document is expected for first ingestion.
+  }
+
+  let uploadedImages;
+  try {
+    uploadedImages = await uploadQQReviewImages(queueId, event.media || []);
+  } catch (error) {
+    return fail(error.message, 'IMAGE_UPLOAD_FAILED');
+  }
+
+  const data = {
+    ...normalized,
+    images: uploadedImages,
+    status: 'pending',
+    receivedAt: now(),
+    updatedAt: now()
+  };
+  await db.collection(COLLECTIONS.qqReviewQueue).doc(queueId).set({ data });
+  return ok({
+    queueId,
+    duplicate: false,
+    status: 'pending',
+    imageCount: uploadedImages.length
+  });
+}
+
+async function listQQReviewQueue(event) {
+  const tokenError = requireConfiguredToken(
+    QQ_REVIEW_CONFIG.adminToken,
+    bearerToken(event),
+    '请先在云函数环境变量中配置 QQ_REVIEW_ADMIN_TOKEN'
+  );
+  if (tokenError) return tokenError;
+  const status = ['pending', 'approved', 'rejected'].includes(event.status)
+    ? event.status
+    : 'pending';
+  const limit = clampInteger(event.limit, 50, 1, 100);
+  const result = await db.collection(COLLECTIONS.qqReviewQueue)
+    .where({ status })
+    .orderBy('receivedAt', 'desc')
+    .limit(limit)
+    .get();
+  return ok({
+    items: result.data,
+    status,
+    count: result.data.length
+  });
+}
+
+async function reviewQQItem(event) {
+  const tokenError = requireConfiguredToken(
+    QQ_REVIEW_CONFIG.adminToken,
+    bearerToken(event),
+    '请先在云函数环境变量中配置 QQ_REVIEW_ADMIN_TOKEN'
+  );
+  if (tokenError) return tokenError;
+  const queueId = String(event.queueId || '').trim();
+  const decision = String(event.decision || '').trim();
+  if (!queueId || !['approve', 'reject'].includes(decision)) {
+    return fail('缺少审核记录或审核动作');
+  }
+
+  const reviewResult = await db.collection(COLLECTIONS.qqReviewQueue).doc(queueId).get();
+  const review = reviewResult?.data;
+  if (!review) return fail('审核记录不存在', 'NOT_FOUND');
+  if (review.status !== 'pending') {
+    return fail(`该记录已经是 ${review.status} 状态`, 'ALREADY_REVIEWED');
+  }
+
+  if (decision === 'reject') {
+    await db.collection(COLLECTIONS.qqReviewQueue).doc(queueId).update({
+      data: {
+        status: 'rejected',
+        reviewNote: String(event.reviewNote || '').slice(0, 300),
+        reviewedBy: 'website-admin',
+        reviewedAt: now(),
+        updatedAt: now()
+      }
+    });
+    return ok({ queueId, status: 'rejected' });
+  }
+
+  const draft = sanitizeDraft(event.draft || {}, review.draft || {});
+  const imageUrls = (review.images || []).map((image) => image.fileId).filter(Boolean);
+  const itemData = {
+    type: draft.type,
+    title: draft.title,
+    description: draft.description,
+    category: draft.category,
+    aiTags: draft.tags,
+    imageUrls,
+    thumbUrl: imageUrls[0] || '',
+    visualDescription: '',
+    yoloObjects: [],
+    semanticTags: draft.tags,
+    imageEmbedding: [],
+    semanticEmbedding: [],
+    locationId: draft.locationId,
+    locationName: draft.locationName,
+    locationArea: draft.locationArea,
+    locationNearby: [],
+    locationGuide: '',
+    locationDetail: draft.locationDetail,
+    mapX: null,
+    mapY: null,
+    latitude: null,
+    longitude: null,
+    status: 'active',
+    ownerOpenid: `qq-import:${review.groupId}`,
+    ownerName: 'QQ群成员',
+    ownerContact: '',
+    privacyRedacted: draft.privacyRedacted,
+    source: {
+      channel: 'QQ群',
+      groupId: review.groupId,
+      messageId: review.messageId,
+      authorAlias: '群成员',
+      sentAt: review.sentAt,
+      message: draft.privacyRedacted ? '原始消息含隐私内容，公开版本已脱敏。' : review.content,
+      reviewQueueId: queueId
+    },
+    createdAt: now(),
+    updatedAt: now()
+  };
+  const created = await db.collection(COLLECTIONS.items).add({ data: itemData });
+  await db.collection(COLLECTIONS.qqReviewQueue).doc(queueId).update({
+    data: {
+      status: 'approved',
+      draft,
+      publishedItemId: created._id,
+      reviewedBy: 'website-admin',
+      reviewedAt: now(),
+      updatedAt: now()
+    }
+  });
+  return ok({ queueId, status: 'approved', itemId: created._id });
+}
+
+exports.main = async (event = {}, runtimeContext = {}) => {
+  event = parseRuntimeEvent(event);
+  const context = cloud.getWXContext();
+  const callerId = resolveCallerId(context, runtimeContext);
+  const request = { ...event, __callerId: callerId };
+  try {
+    if (AUTH_REQUIRED_ACTIONS.has(request.action) && !callerId) {
+      return fail('请先登录后再执行此操作', 'UNAUTHENTICATED');
+    }
+    switch (request.action) {
       case 'login':
-        return login(event, context);
+        return login(request, { ...context, OPENID: callerId });
       case 'createItem':
-        return createItem(event, context);
+        return createItem(request, { ...context, OPENID: callerId });
       case 'classifyImage':
-        return classifyImage(event);
+        return classifyImage(request, callerId);
       case 'listItems':
-        return listItems(event);
+        return listItems(request);
       case 'getItemDetail':
-        return getItemDetail(event);
+        return getItemDetail(request);
       case 'listLocations':
-        return listLocations(event);
+        return listLocations(request);
       case 'createComment':
-        return createComment(event, context);
+        return createComment(request, { ...context, OPENID: callerId });
       case 'sendThanks':
-        return sendThanks(event, context);
+        return sendThanks(request, { ...context, OPENID: callerId });
       case 'markReturned':
-        return updateReturnStatus(event, context, true);
+        return updateReturnStatus(request, { ...context, OPENID: callerId }, true);
       case 'undoReturned':
-        return updateReturnStatus(event, context, false);
+        return updateReturnStatus(request, { ...context, OPENID: callerId }, false);
       case 'reportContent':
-        return reportContent(event, context);
+        return reportContent(request, { ...context, OPENID: callerId });
+      case 'ingestQQMessage':
+        return ingestQQMessage(request);
+      case 'listQQReviewQueue':
+        return listQQReviewQueue(request);
+      case 'reviewQQItem':
+        return reviewQQItem(request);
       default:
-        return fail(`未知 action: ${event.action}`);
+        return fail(`未知 action: ${request.action}`);
     }
   } catch (error) {
-    return fail(error.message || '服务异常', 'INTERNAL_ERROR');
+    console.error('[lostfound] unhandled error', error);
+    return fail('服务暂时不可用，请稍后再试', 'INTERNAL_ERROR');
   }
 };

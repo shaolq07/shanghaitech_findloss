@@ -3,6 +3,7 @@ import cardImage from './assets/items/card.jpg';
 import earbudsImage from './assets/items/earbuds.jpg';
 import keysImage from './assets/items/keys.jpg';
 import notebookImage from './assets/items/notebook.jpg';
+import { qqChatItems } from './qqChatItems.js';
 
 export const categories = ['全部', '证件', '电子产品', '书本资料', '衣物', '钥匙', '校园卡', '雨伞', '水杯', '其他'];
 
@@ -39,11 +40,15 @@ export const locations = [
   { id: 'food-court', name: '尚科美食广场', area: '餐饮', x: 72, y: 58, guide: '二号食堂一楼和二楼' },
   { id: 'magnolia', name: '白玉兰餐厅', area: '餐饮', x: 64, y: 63, guide: '三号食堂，靠近图书馆' },
   { id: 'dorms', name: '学生公寓', area: '住宿区', x: 82, y: 36, guide: '学生公寓楼群与生活区道路' },
+  { id: 'dao-college', name: '大道书院', area: '住宿区', x: 79, y: 39, guide: '大道书院宿管处及附近生活区' },
+  { id: 'cainiao', name: '菜鸟驿站', area: '生活区', x: 86, y: 43, guide: '菜鸟驿站取件、拆包区域' },
+  { id: 'pickup-lockers', name: '快递取件柜', area: '生活区', x: 84, y: 47, guide: '校园生活区快递取件柜附近' },
+  { id: 'music-venue', name: '音乐会场地', area: '公共空间', x: 61, y: 55, guide: '群聊记录中的当晚音乐会现场' },
   { id: 'athletic', name: '体育馆', area: '运动区', x: 84, y: 65, guide: '体育馆、看台及运动设施周边' },
   { id: 'south-gate', name: '南门', area: '出入口', x: 52, y: 94, guide: '华夏中路 393 号出入口' }
 ];
 
-export const seedItems = [
+const demoItems = [
   {
     id: 'item_umbrella_found_1',
     type: 'found',
@@ -137,3 +142,5 @@ export const seedItems = [
     returnedAt: '2026-06-27T12:00:00.000Z'
   }
 ];
+
+export const seedItems = [...qqChatItems, ...demoItems];

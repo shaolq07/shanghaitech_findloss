@@ -7,6 +7,7 @@
     "thanks": "owner-related reads only, writes through cloud function",
     "notifications": "user can read own notifications only, writes through cloud function",
     "reports": "admins only, writes through cloud function",
-    "users": "user can read/update own profile, writes through cloud function"
+    "users": "user can read/update own profile, writes through cloud function",
+    "qq_review_queue": "no direct client access; ingest and moderation only through the lostfound cloud function"
   }
 }

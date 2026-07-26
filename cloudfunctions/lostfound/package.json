@@ -1,11 +1,15 @@
 {
   "name": "lostfound",
   "version": "1.0.0",
-  "description": "Unified cloud function for ShanghaiTech lost and found miniprogram",
+  "description": "Secure CloudBase backend for the ShanghaiTech lost-and-found Web app",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test security.test.js qq-review.test.js",
+    "check": "node --check index.js && npm test"
+  },
   "dependencies": {
-    "node-fetch": "^2.7.0",
-    "ws": "^8.21.0",
-    "wx-server-sdk": "latest"
+    "node-fetch": "2.7.0",
+    "ws": "8.21.0",
+    "wx-server-sdk": "2.5.3"
   }
 }

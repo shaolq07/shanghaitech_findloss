@@ -1,11 +1,7 @@
-const TCB_ENV_ID = import.meta.env.VITE_CLOUDBASE_ENV_ID || import.meta.env.VITE_TCB_ENV_ID || 'cloud1-d9gnyuxf5b44b6b92';
-const TCB_ACCESS_KEY = import.meta.env.VITE_CLOUDBASE_ACCESS_KEY || import.meta.env.VITE_TCB_ACCESS_KEY || '';
-const TCB_REGION = import.meta.env.VITE_CLOUDBASE_REGION || import.meta.env.VITE_TCB_REGION || 'ap-shanghai';
-const TCB_FUNCTION_NAME = import.meta.env.VITE_CLOUDBASE_FUNCTION_NAME || import.meta.env.VITE_TCB_FUNCTION_NAME || 'lostfound';
-const TCB_ENABLED = import.meta.env.VITE_DISABLE_TCB_HUNYUAN !== 'true' && Boolean(TCB_ENV_ID);
-const REMOTE_MODEL_ENDPOINT = import.meta.env.VITE_MODEL_API_URL || import.meta.env.VITE_HUNYUAN_API_URL || '';
+import { callLostfound, isCloudConfigured, readableCloudError } from './cloud.js';
 
-let cloudbaseAppPromise = null;
+const REMOTE_MODEL_ENDPOINT = import.meta.env.VITE_MODEL_API_URL || import.meta.env.VITE_HUNYUAN_API_URL || '';
+const TCB_ENABLED = isCloudConfigured() && import.meta.env.VITE_DISABLE_TCB_HUNYUAN !== 'true';
 
 function unique(values = []) {
   return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)));
@@ -73,105 +69,16 @@ function endpointRequiredMessage() {
   ].join('');
 }
 
-function parseMaybeJson(value) {
-  if (!value || typeof value !== 'string') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function readableError(error, fallback = '调用失败') {
-  const parts = [
-    error?.message,
-    error?.msg,
-    error?.errMsg,
-    error?.code,
-    error?.errCode,
-    error?.error?.message,
-    error?.error?.code
-  ].filter(Boolean);
-  if (parts.length) return parts.join(' ');
-  try {
-    const json = JSON.stringify(error);
-    if (json && json !== '{}') return json;
-  } catch {
-    // Ignore serialization failures and use the fallback below.
-  }
-  const text = String(error || '');
-  return text && text !== '[object Object]' ? text : fallback;
-}
-
-function withTimeout(promise, ms, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer));
-}
-
-async function getCloudbaseApp() {
-  if (!cloudbaseAppPromise) {
-    cloudbaseAppPromise = Promise.resolve().then(async () => {
-      const { default: cloudbase } = await import('@cloudbase/js-sdk');
-      const config = {
-        env: TCB_ENV_ID,
-        region: TCB_REGION
-      };
-      if (TCB_ACCESS_KEY) config.accessKey = TCB_ACCESS_KEY;
-      const app = cloudbase.init(config);
-      await ensureCloudbaseAuth(app);
-      return app;
-    });
-  }
-  return cloudbaseAppPromise;
-}
-
-async function ensureCloudbaseAuth(app) {
-  const auth = typeof app.auth === 'function' ? app.auth({ persistence: 'local' }) : app.auth;
-  if (!auth) return;
-
-  const state = await (auth.hasLoginState?.() || auth.getLoginState?.()).catch(() => null);
-  if (state) return;
-
-  if (typeof auth.signInAnonymously === 'function') {
-    await auth.signInAnonymously();
-    return;
-  }
-
-  const provider = typeof auth.anonymousAuthProvider === 'function'
-    ? auth.anonymousAuthProvider()
-    : auth.anonymousAuthProvider;
-  if (provider?.signIn) {
-    await provider.signIn();
-  }
-}
-
 async function classifyViaCloudbase(dataUrl, hint) {
   if (!TCB_ENABLED) return null;
 
   const compressed = await compressDataUrl(dataUrl);
-  const app = await getCloudbaseApp();
-  const response = await withTimeout(
-    app.callFunction({
-      name: TCB_FUNCTION_NAME,
-      parse: true,
-      data: {
-        action: 'classifyImage',
-        imageBase64: compressed.replace(/^data:[^,]+,/, ''),
-        mimeType: 'image/jpeg',
-        hint
-      }
-    }),
-    30000,
-    '调用小程序云函数混元识别超时'
-  );
-  const body = parseMaybeJson(response?.result) || {};
-  if (!body.ok) {
-    throw new Error(body.message || body.error || '小程序云函数 classifyImage 返回失败');
-  }
-  return normalizeRemoteData(body.data);
+  const data = await callLostfound('classifyImage', {
+    imageBase64: compressed.replace(/^data:[^,]+,/, ''),
+    mimeType: 'image/jpeg',
+    hint
+  });
+  return normalizeRemoteData(data);
 }
 
 async function classifyViaHunyuan(dataUrl, hint) {
@@ -205,14 +112,14 @@ export async function recognizeImageFile(file, hint = '') {
   try {
     data = await classifyViaCloudbase(dataUrl, textHint);
   } catch (error) {
-    errors.push(`小程序云函数混元识别失败：${readableError(error)}`);
+    errors.push(`小程序云函数混元识别失败：${readableCloudError(error)}`);
   }
 
   if (!data) {
     try {
       data = await classifyViaHunyuan(dataUrl, textHint);
     } catch (error) {
-      errors.push(`后端混元代理识别失败：${readableError(error)}`);
+      errors.push(`后端混元代理识别失败：${readableCloudError(error)}`);
     }
   }
 

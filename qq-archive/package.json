@@ -1,0 +1,17 @@
+{
+  "name": "lockmyitem-qq-group-archive",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "mcp": "node src/mcp-server.mjs",
+    "configure:napcat": "node scripts/configure-napcat-runtime.mjs",
+    "watch:napcat-login": "node scripts/watch-napcat-login.mjs",
+    "index:existing": "node scripts/index-existing-media.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

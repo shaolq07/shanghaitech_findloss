@@ -35,3 +35,13 @@ Thumbs.db
 # Local Codex workspace files
 .agents/
 skills-lock.json
+
+# Runtime QQ group archive data
+QQ聊天记录/.qq-archive.lock
+QQ聊天记录/exports/
+QQ聊天记录/archive-media/
+QQ聊天记录/cloud-outbox/
+QQ聊天记录/existing-media.jsonl
+
+# Local third-party bot runtime
+_runtime/

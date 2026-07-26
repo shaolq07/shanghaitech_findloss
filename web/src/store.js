@@ -3,13 +3,47 @@ import { classifyByText } from './utils.js';
 
 const STORAGE_KEY = 'shanghaitech_lostfound_web_v1';
 const AUTH_KEY = 'shanghaitech_lostfound_web_user_v1';
+const seedItemIds = new Set(seedItems.map((item) => item.id));
+const legacyFallbackImages = new Set(Object.values(categoryImages));
+const imageFileName = (value) => String(value || '').split(/[?#]/, 1)[0].split('/').pop();
+const legacyFallbackImageFiles = new Set(
+  [...legacyFallbackImages].map(imageFileName).filter(Boolean)
+);
+
+function removeLegacyFallbackImage(item) {
+  const isLegacyFallback = legacyFallbackImages.has(item?.image)
+    || legacyFallbackImageFiles.has(imageFileName(item?.image));
+
+  if (!item || seedItemIds.has(item.id) || !isLegacyFallback) {
+    return item;
+  }
+
+  const images = Array.isArray(item.images)
+    ? item.images.filter((image) => (
+      !legacyFallbackImages.has(image)
+      && !legacyFallbackImageFiles.has(imageFileName(image))
+    ))
+    : item.images;
+
+  return {
+    ...item,
+    image: images?.[0] || '',
+    ...(Array.isArray(images) ? { images } : {})
+  };
+}
 
 export function loadItems() {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (!saved) return seedItems;
   try {
     const parsed = JSON.parse(saved);
-    return Array.isArray(parsed.items) ? parsed.items : seedItems;
+    if (!Array.isArray(parsed.items)) return seedItems;
+    const sanitizedItems = parsed.items.map(removeLegacyFallbackImage);
+    const savedIds = new Set(sanitizedItems.map((item) => item.id));
+    const newlyImportedItems = seedItems.filter(
+      (item) => item.source?.channel === 'QQ群' && !savedIds.has(item.id)
+    );
+    return [...newlyImportedItems, ...sanitizedItems];
   } catch {
     return seedItems;
   }
@@ -50,7 +84,7 @@ export function createItem(payload) {
     description: payload.description.trim(),
     category: classification.category,
     tags: Array.from(new Set([classification.category, ...(payload.tags || classification.tags || [])])).filter(Boolean),
-    image: payload.image || categoryImages[classification.category] || categoryImages.其他,
+    image: payload.image || '',
     visualDescription: payload.visualDescription || '',
     rawPredictions: payload.rawPredictions || [],
     locationId: payload.locationId,

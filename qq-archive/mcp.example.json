@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "qq-group-archive": {
+      "command": "node",
+      "args": [
+        "D:/Uni1.2/做点好玩的/AI创赛--校园失物招领系统/qq-archive/src/mcp-server.mjs"
+      ],
+      "env": {
+        "QQ_ARCHIVE_ROOT": "D:/Uni1.2/做点好玩的/AI创赛--校园失物招领系统/QQ聊天记录"
+      }
+    }
+  }
+}

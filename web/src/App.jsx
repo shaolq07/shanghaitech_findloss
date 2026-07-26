@@ -3,6 +3,8 @@ import { categories, locations } from './data.js';
 import { clearUser, createItem, loadItems, loadUser, saveItems, saveUser } from './store.js';
 import { classifyByText, findPotentialMatches, formatDate, getLocation } from './utils.js';
 import { recognizeImageFile } from './vision.js';
+import QQReviewPage from './QQReviewPage.jsx';
+import { callLostfound, resolveCloudFileUrls } from './cloud.js';
 import campusBoardImage from './assets/notice/campus-board.jpg';
 import doneIcon from './assets/tabbar/done.png';
 import doneActiveIcon from './assets/tabbar/done-active.png';
@@ -14,13 +16,16 @@ import searchIcon from './assets/tabbar/search.png';
 import searchActiveIcon from './assets/tabbar/search-active.png';
 
 const tabItems = [
-  { key: 'found', text: '失物招领', icon: foundIcon, activeIcon: foundActiveIcon },
+  { key: 'found', text: '发现', icon: foundIcon, activeIcon: foundActiveIcon },
   { key: 'lost', text: '寻物', icon: searchIcon, activeIcon: searchActiveIcon },
   { key: 'returned', text: '已找到', icon: doneIcon, activeIcon: doneActiveIcon },
   { key: 'me', text: '我的', icon: meIcon, activeIcon: meActiveIcon }
 ];
 
 function App() {
+  if (window.location.pathname.replace(/\/+$/, '') === '/review') {
+    return <QQReviewPage />;
+  }
   const [items, setItems] = useState(() => loadItems());
   const [currentUser, setCurrentUser] = useState(() => loadUser());
   const [view, setView] = useState('found');
@@ -28,6 +33,33 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [toast, setToast] = useState('');
   const [authPrompt, setAuthPrompt] = useState(null);
+  const [cloudSync, setCloudSync] = useState('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCloudItems() {
+      try {
+        const data = await callLostfound('listItems', {
+          filters: { status: 'active', limit: 50 }
+        });
+        const fileIds = (data.items || []).flatMap((item) => item.imageUrls || []);
+        const imageUrls = await resolveCloudFileUrls(fileIds);
+        const cloudItems = (data.items || []).map((item) => mapCloudItem(item, imageUrls));
+        if (cancelled) return;
+        setItems((current) => {
+          const cloudIds = new Set(cloudItems.map((item) => item.id));
+          return [...cloudItems, ...current.filter((item) => !cloudIds.has(item.id))];
+        });
+        setCloudSync('ok');
+      } catch {
+        if (!cancelled) setCloudSync('offline');
+      }
+    }
+    loadCloudItems();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     saveItems(items);
@@ -80,6 +112,7 @@ function App() {
     const nextItem = createItem({
       ...payload,
       ownerName: currentUser?.nickName || payload.ownerName,
+      ownerContact: currentUser?.contact || '',
       title: payload.title || (payload.type === 'lost' ? '未命名寻物' : '未命名招领'),
       description: payload.description || '暂无补充描述'
     });
@@ -122,6 +155,49 @@ function App() {
     setToast('已退出登录');
   }
 
+  function updateProfile(profile) {
+    requireAuth('保存个人资料', (user) => {
+      const nextUser = {
+        ...user,
+        nickName: profile.nickName.trim() || user.nickName,
+        contact: profile.emailPrefix.trim()
+          ? `${profile.emailPrefix.trim()}@shanghaitech.edu.cn`
+          : user.contact
+      };
+      saveUser(nextUser);
+      setCurrentUser(nextUser);
+      setToast('资料已保存');
+    });
+  }
+
+  function addComment(item, content) {
+    const text = content.trim();
+    if (!text) return;
+    requireAuth('提交线索', (user) => {
+      const comment = {
+        id: `comment_${Date.now()}`,
+        authorName: user.nickName,
+        content: text,
+        createdAt: new Date().toISOString()
+      };
+      setItems((current) => current.map((entry) => (
+        entry.id === item.id
+          ? { ...entry, comments: [...(entry.comments || []), comment] }
+          : entry
+      )));
+      setToast('线索已发送');
+    });
+  }
+
+  function reportItem(item) {
+    requireAuth('举报内容', () => {
+      setItems((current) => current.map((entry) => (
+        entry.id === item.id ? { ...entry, reported: true } : entry
+      )));
+      setToast('举报已记录，感谢维护校园互助环境');
+    });
+  }
+
   function markReturned(id) {
     setItems((current) => current.map((item) => (
       item.id === id
@@ -150,6 +226,7 @@ function App() {
           activeCategory={activeCategory}
           setActiveCategory={setActiveCategory}
           total={stats.found}
+          cloudSync={cloudSync}
           onPublish={() => openPublish('found')}
           onOpen={openDetail}
         />
@@ -184,6 +261,7 @@ function App() {
           onMarkReturned={markReturned}
           onUndoReturned={undoReturned}
           onLogout={logout}
+          onSaveProfile={updateProfile}
         />
       )}
 
@@ -203,6 +281,13 @@ function App() {
           items={items}
           onBack={() => openTab(selectedItem.status === 'returned' ? 'returned' : selectedItem.type)}
           onClaim={() => submitClaim(selectedItem)}
+          onContact={() => requireAuth('联系发布人', () => setToast(
+            selectedItem.ownerContact
+              ? `发布人联系方式：${selectedItem.ownerContact}`
+              : '发布人暂未留下公开联系方式，请提交认领或线索申请'
+          ))}
+          onComment={(content) => addComment(selectedItem, content)}
+          onReport={() => reportItem(selectedItem)}
           onMarkReturned={() => markReturned(selectedItem.id)}
           onUndoReturned={() => undoReturned(selectedItem.id)}
         />
@@ -221,8 +306,13 @@ function App() {
   );
 }
 
-function FoundPage({ items, activeCategory, setActiveCategory, total, onPublish, onOpen }) {
+function FoundPage({ items, activeCategory, setActiveCategory, total, cloudSync, onPublish, onOpen }) {
   const list = filterItems(items, 'found', 'active', activeCategory);
+  const qqItems = items.filter((item) => item.type === 'found' && item.source?.channel === 'QQ群');
+  const qqPhotoCount = qqItems.reduce(
+    (count, item) => count + (item.images?.length || (item.image ? 1 : 0)),
+    0
+  );
   return (
     <section className="page found-page">
       <div className="board-head">
@@ -239,6 +329,23 @@ function FoundPage({ items, activeCategory, setActiveCategory, total, onPublish,
         </div>
         <img className="notice-image" src={campusBoardImage} alt="" />
       </button>
+
+      <div className="qq-import-card" aria-label={`QQ群发现已同步 ${qqItems.length} 条信息、${qqPhotoCount} 张照片`}>
+        <div className="qq-import-head">
+          <div>
+            <span className="qq-import-kicker">QQ群发现 · 731332881</span>
+            <strong className="qq-import-title">群聊线索已同步到官网</strong>
+          </div>
+          <span className={`qq-sync-badge ${cloudSync === 'offline' ? 'offline' : ''}`}>
+            {cloudSync === 'loading' ? '连接中' : cloudSync === 'ok' ? '云端已连接' : '等待云端'}
+          </span>
+        </div>
+        <div className="qq-import-stats">
+          <span><strong>{qqItems.length}</strong> 条招领</span>
+          <span><strong>{qqPhotoCount}</strong> 张照片</span>
+          <span>审核通过后公开</span>
+        </div>
+      </div>
 
       <CategoryBar value={activeCategory} onChange={setActiveCategory} tone="found" />
 
@@ -344,13 +451,23 @@ function ReturnedPage({ items, total, onOpen }) {
   );
 }
 
-function MePage({ items, stats, currentUser, onPublish, onOpen, onMarkReturned, onUndoReturned, onLogout }) {
+function MePage({
+  items,
+  stats,
+  currentUser,
+  onPublish,
+  onOpen,
+  onMarkReturned,
+  onUndoReturned,
+  onLogout,
+  onSaveProfile
+}) {
   const [profile, setProfile] = useState({
-    nickName: currentUser?.nickName || '微信用户',
+    nickName: currentUser?.nickName || '校内用户',
     emailPrefix: currentUser?.contact ? currentUser.contact.replace('@shanghaitech.edu.cn', '') : ''
   });
   const shownItems = items.slice(0, 8);
-  const displayName = currentUser?.nickName || profile.nickName || '微信用户';
+  const displayName = currentUser?.nickName || profile.nickName || '校内用户';
   const avatarText = displayName.slice(0, 1);
 
   return (
@@ -364,12 +481,12 @@ function MePage({ items, stats, currentUser, onPublish, onOpen, onMarkReturned, 
           <div className="avatar">{avatarText}</div>
           <div className="identity">
             <h1 className="name">{displayName}</h1>
-            <p className="subtitle">{currentUser ? currentUser.contact : '发布或认领时再登录'}</p>
+            {currentUser?.contact && <p className="subtitle">{currentUser.contact}</p>}
           </div>
         </div>
         <div className="hero-badge">
-          <span>ShanghaiTech Lost &amp; Found</span>
-          <span>找回、归还、提醒都在这里</span>
+          <span>上科大失物招领</span>
+          <span>校园失物互助平台</span>
         </div>
       </div>
 
@@ -382,13 +499,14 @@ function MePage({ items, stats, currentUser, onPublish, onOpen, onMarkReturned, 
       <div className="card profile-form">
         <div className="section-head">
           <div>
-            <span className="section-kicker">账号资料</span>
-            <h2 className="form-title">注册资料</h2>
+            <span className="section-kicker">个人资料</span>
+            <h2 className="form-title">校园账号</h2>
           </div>
-          <span className="section-note">用于找回提醒</span>
+          <span className="section-note">校内联系信息</span>
         </div>
         <input
           className="profile-input"
+          aria-label="昵称"
           placeholder="昵称"
           value={profile.nickName}
           onChange={(event) => setProfile((current) => ({ ...current, nickName: event.target.value }))}
@@ -396,6 +514,7 @@ function MePage({ items, stats, currentUser, onPublish, onOpen, onMarkReturned, 
         <div className="email-edit">
           <input
             className="email-prefix"
+            aria-label="上科大邮箱前缀"
             placeholder="邮箱前缀"
             type="text"
             value={profile.emailPrefix}
@@ -403,17 +522,17 @@ function MePage({ items, stats, currentUser, onPublish, onOpen, onMarkReturned, 
           />
           <span className="email-domain">@shanghaitech.edu.cn</span>
         </div>
-        <button className="button-primary save-profile" type="button">保存资料</button>
+        <button className="button-primary save-profile" type="button" onClick={() => onSaveProfile(profile)}>保存资料</button>
         {currentUser && (
           <button className="button-secondary logout-button" type="button" onClick={onLogout}>退出登录</button>
         )}
       </div>
 
       <div className="quick-actions">
-        <button className="quick-card secondary" type="button">
-          <strong className="quick-title">消息中心</strong>
-          <span className="quick-subtitle">查看评论与提醒</span>
-        </button>
+        <div className="quick-card secondary">
+          <strong className="quick-title">校内互助</strong>
+          <span className="quick-subtitle">仅展示必要联系信息</span>
+        </div>
         <button className="quick-card primary" type="button" onClick={onPublish}>
           <strong className="quick-title">继续发布</strong>
           <span className="quick-subtitle">上传线索或寻物</span>
@@ -465,7 +584,7 @@ function PublishPage({ initialType, items, currentUser, onCancel, onSubmit }) {
     rawPredictions: [],
     locationId: locations[0].id,
     image: '',
-    ownerName: currentUser?.nickName || '网页用户'
+    ownerName: currentUser?.nickName || '校内用户'
   });
   const [classifying, setClassifying] = useState(false);
   const [modelError, setModelError] = useState('');
@@ -562,7 +681,7 @@ function PublishPage({ initialType, items, currentUser, onCancel, onSubmit }) {
 
         <label className="image-picker">
           {form.image ? (
-            <img src={form.image} alt="" />
+            <img src={form.image} alt="待发布物品预览" />
           ) : (
             <span className="image-empty">
               <span className="image-plus">+</span>
@@ -586,14 +705,14 @@ function PublishPage({ initialType, items, currentUser, onCancel, onSubmit }) {
 
         <div className="form-section">
           <span className="section-kicker">物品信息</span>
-          <input className="field" placeholder="物品标题，可不填" value={form.title} onChange={(event) => update('title', event.target.value)} />
-          <textarea className="field textarea" placeholder="补充描述，可不填" value={form.description} onChange={(event) => update('description', event.target.value)} />
+          <input className="field" aria-label="物品标题" placeholder="物品标题，可不填" value={form.title} onChange={(event) => update('title', event.target.value)} />
+          <textarea className="field textarea" aria-label="物品描述" placeholder="补充描述，可不填" value={form.description} onChange={(event) => update('description', event.target.value)} />
         </div>
 
         <div className="form-section">
           <div className="section-head publish-section-head">
             <span className="section-kicker">物品分类</span>
-            <span className="section-note">可自动识别，也可手动改</span>
+            <span className="section-note">请选择最符合的类别</span>
           </div>
           {form.category && (
             <div className="ai-result">
@@ -621,7 +740,7 @@ function PublishPage({ initialType, items, currentUser, onCancel, onSubmit }) {
                 <span className="location-subtitle">{getLocation(form.locationId).area}</span>
               </div>
             </div>
-            <select className="field select-field" value={form.locationId} onChange={(event) => update('locationId', event.target.value)}>
+            <select className="field select-field" aria-label="失物地点" value={form.locationId} onChange={(event) => update('locationId', event.target.value)}>
               {locations.map((location) => (
                 <option key={location.id} value={location.id}>{location.name}</option>
               ))}
@@ -746,7 +865,7 @@ function AuthModal({ actionLabel, onClose, onSubmit }) {
     }
     onSubmit({
       id: `user_${Date.now()}`,
-      nickName: nickName || contact.split('@')[0] || '网页用户',
+      nickName: nickName || contact.split('@')[0] || '校内用户',
       contact,
       createdAt: new Date().toISOString()
     });
@@ -758,8 +877,8 @@ function AuthModal({ actionLabel, onClose, onSubmit }) {
         <div className="auth-head">
           <div>
             <span className="auth-kicker">{actionLabel}</span>
-            <h2>{mode === 'register' ? '先注册一个校内账号' : '登录后继续'}</h2>
-            <p>只在发布、认领或提交线索时需要登录。</p>
+            <h2>{mode === 'register' ? '注册校内账号' : '登录账号'}</h2>
+            <p>登录后可发布信息、认领物品和提交线索。</p>
           </div>
           <button className="auth-close" type="button" aria-label="关闭" onClick={onClose}>×</button>
         </div>
@@ -783,7 +902,7 @@ function AuthModal({ actionLabel, onClose, onSubmit }) {
 
         <label className="auth-field">
           <span>密码</span>
-          <input type="password" value={form.password} placeholder="用于演示登录" onChange={(event) => update('password', event.target.value)} />
+          <input type="password" value={form.password} placeholder="请输入密码" onChange={(event) => update('password', event.target.value)} />
         </label>
 
         {error && <div className="auth-error">{error}</div>}
@@ -791,23 +910,37 @@ function AuthModal({ actionLabel, onClose, onSubmit }) {
         <button className="button-primary auth-submit" type="submit">
           {mode === 'register' ? '注册并继续' : '登录并继续'}
         </button>
-        <p className="auth-note">当前是网页演示版，账号信息保存在本机浏览器。</p>
       </form>
     </div>
   );
 }
 
-function DetailPage({ item, items, onBack, onClaim }) {
+function DetailPage({ item, items, onBack, onClaim, onContact, onComment, onReport }) {
   const matches = findPotentialMatches(item, items);
   const location = getLocation(item.locationId);
   const claimCount = item.claims?.length || 0;
+  const gallery = item.images?.length ? item.images : (item.image ? [item.image] : []);
+  const [comment, setComment] = useState('');
+
+  function submitComment() {
+    if (!comment.trim()) return;
+    onComment(comment);
+    setComment('');
+  }
 
   return (
     <section className="page detail-page">
       <button className="back-button" type="button" onClick={onBack}>返回</button>
 
-      <div className="detail-image">
-        {item.image ? <img src={item.image} alt="" /> : <span>{item.category}</span>}
+      <div className={`detail-gallery ${gallery.length > 1 ? 'multi' : ''}`}>
+        {gallery.length ? gallery.map((image, index) => (
+          <figure className="detail-image" key={`${item.id}_photo_${index}`}>
+            <img src={image} alt={`${item.title}，照片 ${index + 1}/${gallery.length}`} />
+            <figcaption>照片 {index + 1}/{gallery.length}</figcaption>
+          </figure>
+        )) : (
+          <div className="detail-image"><span>{item.category}</span></div>
+        )}
       </div>
 
       <div className="card detail-card">
@@ -825,6 +958,24 @@ function DetailPage({ item, items, onBack, onClaim }) {
         </div>
       </div>
 
+      {item.source?.channel === 'QQ群' && (
+        <div className="card qq-source-card">
+          <div className="qq-source-head">
+            <div>
+              <span className="qq-import-kicker">来自 QQ 群 · {item.source.groupId}</span>
+              <strong>{item.source.authorAlias} · {formatDate(item.source.sentAt)}</strong>
+            </div>
+            <span className="qq-sync-badge">群聊原始线索</span>
+          </div>
+          <blockquote>“{item.source.message}”</blockquote>
+          <div className="analysis-pending">
+            <span className="analysis-dot" />
+            <span>智能分析待同事接入；当前内容按群聊文字人工整理</span>
+          </div>
+          {item.privacyRedacted && <p className="privacy-note">照片中的姓名、学号或人像已做不可逆遮挡。</p>}
+        </div>
+      )}
+
       <div className="card location-card">
         <div className="location-heading">
           <div>
@@ -833,18 +984,20 @@ function DetailPage({ item, items, onBack, onClaim }) {
           </div>
           <span className="location-badge">校内定位</span>
         </div>
-        <div className="location-guide">{location.guide}</div>
+        <div className="location-guide">{item.exactLocation || location.guide}</div>
         <p className="map-note">地图为辅助定位，具体位置以发布人选择的地点标记为准。</p>
       </div>
 
       <div className="action-grid">
-        <button className="button-secondary" type="button">联系发布人</button>
+        <button className="button-secondary" type="button" onClick={onContact}>联系发布人</button>
         {item.status === 'active' && (
           <button className="button-primary" type="button" onClick={onClaim}>
             {item.type === 'lost' ? '我有线索' : '我要认领'}
           </button>
         )}
-        <button className="button-danger" type="button">举报</button>
+        <button className="button-danger" type="button" onClick={onReport} disabled={item.reported}>
+          {item.reported ? '已举报' : '举报'}
+        </button>
       </div>
       {claimCount > 0 && (
         <p className="claim-note">{claimCount} 位同学已提交{item.type === 'lost' ? '线索' : '认领申请'}，请等待发布人确认。</p>
@@ -868,10 +1021,21 @@ function DetailPage({ item, items, onBack, onClaim }) {
       )}
 
       <h2 className="section-title">评论</h2>
-      <div className="empty small">还没有评论</div>
+      {(item.comments || []).length ? (
+        <div className="feed-panel">
+          {item.comments.map((entry) => (
+            <div className="found-row compact" key={entry.id}>
+              <span className="item-copy">
+                <strong className="title">{entry.authorName}</strong>
+                <span className="meta">{entry.content}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : <div className="empty small">还没有评论，欢迎补充线索</div>}
       <div className="comment-box">
-        <input placeholder="写下线索或领取信息" />
-        <button type="button">发送</button>
+        <input aria-label="评论内容" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="写下线索或领取信息" />
+        <button type="button" disabled={!comment.trim()} onClick={submitComment}>发送</button>
       </div>
     </section>
   );
@@ -900,15 +1064,19 @@ function FeedPanel({ items, kind, onOpen }) {
     <div className={`feed-panel ${kind}`}>
       {items.map((item) => (
         <button key={item.id} className="item-row" type="button" onClick={() => onOpen(item.id)}>
-          <span className={`image-box ${kind}`}>
-            {item.image ? <img src={item.image} alt="" /> : <span>{item.category}</span>}
-          </span>
+          <ItemThumbnail item={item} kind={kind} />
           <span className="item-main">
             <span className="item-head">
               <strong className="item-title">{item.title}</strong>
               <span className={`type-pill ${kind === 'lost' ? 'lost' : 'found'}`}>{kind === 'lost' ? '寻物中' : '招领中'}</span>
             </span>
             <span className="item-desc">{item.description}</span>
+            {item.source?.channel === 'QQ群' && (
+              <span className="qq-row-source">
+                <span>QQ群发现</span>
+                <span>{item.source.authorAlias} · {formatDate(item.source.sentAt)}</span>
+              </span>
+            )}
             <span className="item-meta">
               <span className={`pin-dot ${kind === 'lost' ? 'lost' : ''}`} />
               <span>{locationText(item)}</span>
@@ -918,6 +1086,35 @@ function FeedPanel({ items, kind, onOpen }) {
         </button>
       ))}
     </div>
+  );
+}
+
+function ItemThumbnail({ item, kind }) {
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    setLoadFailed(false);
+  }, [item.image]);
+
+  const hasImage = Boolean(item.image) && !loadFailed;
+  const photoCount = item.images?.length || 0;
+
+  return (
+    <span className={`image-box ${kind} ${hasImage ? 'has-image' : 'is-empty'}`}>
+      {hasImage ? (
+        <img
+          src={item.image}
+          alt={`${item.title}的物品照片`}
+          onError={() => setLoadFailed(true)}
+        />
+      ) : (
+        <span className="image-placeholder" aria-label="暂无物品照片">
+          <span aria-hidden="true">◇</span>
+          <small>暂无照片</small>
+        </span>
+      )}
+      {hasImage && photoCount > 1 && <span className="photo-count">{photoCount} 张</span>}
+    </span>
   );
 }
 
@@ -961,6 +1158,40 @@ function itemMeta(item) {
   const date = formatDate(item.createdAt);
   const location = locationText(item);
   return [item.category, location, date].filter(Boolean).join(' · ');
+}
+
+function cloudDate(value) {
+  if (!value) return new Date().toISOString();
+  const candidate = (typeof value === 'string' || typeof value === 'number')
+    ? value
+    : value.$date || value.date || value.value || value.seconds;
+  if (value.seconds) return new Date(value.seconds * 1000).toISOString();
+  const date = new Date(candidate);
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function mapCloudItem(item, resolvedUrls) {
+  const images = (item.imageUrls || [])
+    .map((fileId) => resolvedUrls[fileId] || (/^https:\/\//i.test(fileId) ? fileId : ''))
+    .filter(Boolean);
+  return {
+    id: item._id,
+    type: item.type || 'found',
+    title: item.title || '未命名线索',
+    description: item.description || '暂无补充描述',
+    category: item.category || '其他',
+    tags: item.aiTags || item.semanticTags || [],
+    image: images[0] || '',
+    images,
+    locationId: item.locationId || '',
+    exactLocation: item.locationDetail || item.locationName || '',
+    ownerName: item.ownerName || '校园用户',
+    status: item.status || 'active',
+    createdAt: cloudDate(item.createdAt),
+    privacyRedacted: Boolean(item.privacyRedacted),
+    source: item.source || null,
+    cloudSynced: true
+  };
 }
 
 export default App;

@@ -1,5 +1,16 @@
+import {
+  applyCors,
+  createRateLimiter,
+  getClientIp,
+  validateVisionBody
+} from './security.js';
+
 const HUNYUAN_BASE_URL = (process.env.HUNYUAN_BASE_URL || 'https://api.hunyuan.cloud.tencent.com/v1').replace(/\/$/, '');
 const HUNYUAN_MODEL = process.env.HUNYUAN_MODEL || 'hunyuan-vision';
+const rateLimiter = createRateLimiter({
+  limit: Number(process.env.VISION_RATE_LIMIT || 8),
+  windowMs: Number(process.env.VISION_RATE_WINDOW_MS || 60_000)
+});
 
 function ok(res, data) {
   return res.status(200).json({ ok: true, data });
@@ -60,18 +71,18 @@ function buildVisionPrompt(hint = '') {
   ].join('\n');
 }
 
-function withCors(req, res) {
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'content-type');
-  res.setHeader('Vary', 'Origin');
-}
-
 export default async function handler(req, res) {
-  withCors(req, res);
+  if (!applyCors(req, res, process.env.ALLOWED_ORIGIN || '')) {
+    return fail(res, 403, '请求来源不在允许列表中', 'ORIGIN_NOT_ALLOWED');
+  }
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return fail(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED');
+
+  const rate = rateLimiter.check(getClientIp(req));
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(Math.ceil(rate.retryAfterMs / 1000)));
+    return fail(res, 429, 'AI 识别请求过于频繁，请稍后再试', 'RATE_LIMITED');
+  }
 
   const apiKey = process.env.HUNYUAN_API_KEY
     || process.env.TENCENT_HUNYUAN_API_KEY
@@ -84,10 +95,9 @@ export default async function handler(req, res) {
   }
 
   const body = req.body || {};
+  const validation = validateVisionBody(body);
+  if (!validation.ok) return fail(res, validation.status, validation.message, validation.code);
   const imageUrl = body.imageUrl || normalizeImageBase64(body.imageBase64, body.mimeType || 'image/jpeg');
-  if (!imageUrl) {
-    return fail(res, 400, '缺少 imageBase64 或 imageUrl', 'IMAGE_REQUIRED');
-  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
@@ -145,7 +155,7 @@ export default async function handler(req, res) {
       }
     });
   } catch (error) {
-    const message = error.name === 'AbortError' ? '混元识别超时' : (error.message || '混元识别失败');
+    const message = error.name === 'AbortError' ? '混元识别超时' : '混元识别暂时不可用';
     return fail(res, 502, message, 'HUNYUAN_FAILED');
   } finally {
     clearTimeout(timer);
