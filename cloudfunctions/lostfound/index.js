@@ -8,7 +8,10 @@ const {
   validateVisionInput
 } = require('./security');
 const {
+  QQ_REVIEW_IMAGE_TYPES,
   normalizeIncomingRecord,
+  normalizeQQMediaRefs,
+  orderQQMediaParts,
   parseCsv,
   reviewId,
   safeEqual,
@@ -61,9 +64,23 @@ const QQ_REVIEW_CONFIG = {
   allowedGroupIds: parseCsv(process.env.QQ_REVIEW_GROUP_IDS),
   ingestToken: process.env.QQ_INGEST_TOKEN || '',
   adminToken: process.env.QQ_REVIEW_ADMIN_TOKEN || '',
-  maxImageBytes: Math.min(
-    Number(process.env.QQ_REVIEW_MAX_IMAGE_BYTES || 8 * 1024 * 1024),
+  maxImageBytes: clampInteger(
+    process.env.QQ_REVIEW_MAX_IMAGE_BYTES,
+    8 * 1024 * 1024,
+    1,
     10 * 1024 * 1024
+  ),
+  maxChunkBytes: clampInteger(
+    process.env.QQ_REVIEW_MAX_CHUNK_BYTES,
+    64 * 1024,
+    1024,
+    64 * 1024
+  ),
+  maxUploadChunks: clampInteger(
+    process.env.QQ_REVIEW_MAX_UPLOAD_CHUNKS,
+    256,
+    1,
+    256
   )
 };
 
@@ -657,6 +674,163 @@ async function reportContent(event, context) {
   return ok({ _id: created._id, ...data });
 }
 
+function requireQQIngestToken(event) {
+  return requireConfiguredToken(
+    QQ_REVIEW_CONFIG.ingestToken,
+    bearerToken(event),
+    '请先在云函数环境变量中配置 QQ_INGEST_TOKEN'
+  );
+}
+
+function normalizeQQMediaUpload(event = {}) {
+  const groupId = String(event.groupId || event.group_id || '').trim().slice(0, 32);
+  const messageId = String(event.messageId || event.message_id || '').trim().slice(0, 80);
+  const mediaIndex = Number(event.mediaIndex);
+  const contentType = String(event.contentType || '').toLowerCase();
+  const bytes = Number(event.bytes);
+  const digest = String(event.sha256 || '').toLowerCase();
+  if (!groupId || !messageId) throw new Error('缺少 groupId 或 messageId');
+  if (!Number.isInteger(mediaIndex) || mediaIndex < 0 || mediaIndex > 3) {
+    throw new Error('mediaIndex 无效');
+  }
+  if (!QQ_REVIEW_IMAGE_TYPES.has(contentType)) throw new Error('图片格式不受支持');
+  if (!Number.isInteger(bytes) || bytes < 1 || bytes > QQ_REVIEW_CONFIG.maxImageBytes) {
+    throw new Error('图片大小无效');
+  }
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('图片 sha256 无效');
+  return {
+    groupId,
+    messageId,
+    queueId: reviewId(groupId, messageId),
+    mediaIndex,
+    contentType,
+    bytes,
+    digest,
+    originalFile: String(event.originalFile || '').slice(0, 180)
+  };
+}
+
+function validateQQMediaGroup(groupId) {
+  return QQ_REVIEW_CONFIG.allowedGroupIds.has(groupId)
+    ? null
+    : fail('群号不在云端审核白名单中', 'GROUP_NOT_ALLOWED');
+}
+
+async function uploadQQMediaChunk(event) {
+  const tokenError = requireQQIngestToken(event);
+  if (tokenError) return tokenError;
+
+  let metadata;
+  try {
+    metadata = normalizeQQMediaUpload(event);
+  } catch (error) {
+    return fail(error.message, 'INVALID_QQ_MEDIA');
+  }
+  const groupError = validateQQMediaGroup(metadata.groupId);
+  if (groupError) return groupError;
+
+  const chunkIndex = Number(event.chunkIndex);
+  const chunkCount = Number(event.chunkCount);
+  if (
+    !Number.isInteger(chunkIndex)
+    || !Number.isInteger(chunkCount)
+    || chunkCount < 1
+    || chunkCount > QQ_REVIEW_CONFIG.maxUploadChunks
+    || chunkIndex < 0
+    || chunkIndex >= chunkCount
+  ) {
+    return fail('图片分片序号无效', 'INVALID_QQ_MEDIA_CHUNK');
+  }
+  const encoded = String(event.chunkBase64 || '').replace(/^data:[^,]+,/, '');
+  if (!encoded || encoded.length % 4 !== 0 || !/^[a-zA-Z0-9+/]+={0,2}$/.test(encoded)) {
+    return fail('图片分片编码无效', 'INVALID_QQ_MEDIA_CHUNK');
+  }
+  const fileContent = Buffer.from(encoded, 'base64');
+  if (!fileContent.length || fileContent.length > QQ_REVIEW_CONFIG.maxChunkBytes) {
+    return fail('图片分片大小无效', 'INVALID_QQ_MEDIA_CHUNK');
+  }
+
+  const uploadDirectory = `qq-review-staging/${metadata.queueId}/${metadata.mediaIndex}-${metadata.digest.slice(0, 24)}`;
+  const cloudPath = `${uploadDirectory}/${String(chunkIndex).padStart(4, '0')}.part`;
+  const result = await cloud.uploadFile({ cloudPath, fileContent });
+  return ok({
+    fileId: result.fileID || result.fileId || '',
+    chunkIndex,
+    chunkCount,
+    bytes: fileContent.length
+  });
+}
+
+async function completeQQMediaUpload(event) {
+  const tokenError = requireQQIngestToken(event);
+  if (tokenError) return tokenError;
+
+  let metadata;
+  try {
+    metadata = normalizeQQMediaUpload(event);
+  } catch (error) {
+    return fail(error.message, 'INVALID_QQ_MEDIA');
+  }
+  const groupError = validateQQMediaGroup(metadata.groupId);
+  if (groupError) return groupError;
+
+  const chunkCount = Number(event.chunkCount);
+  const parts = Array.isArray(event.parts) ? event.parts : [];
+  if (
+    !Number.isInteger(chunkCount)
+    || chunkCount < 1
+    || chunkCount > QQ_REVIEW_CONFIG.maxUploadChunks
+    || parts.length !== chunkCount
+  ) {
+    return fail('图片分片列表不完整', 'INVALID_QQ_MEDIA_PARTS');
+  }
+
+  const uploadDirectory = `qq-review-staging/${metadata.queueId}/${metadata.mediaIndex}-${metadata.digest.slice(0, 24)}`;
+  let ordered;
+  try {
+    ordered = orderQQMediaParts(parts, chunkCount, uploadDirectory);
+  } catch (error) {
+    return fail(error.message, 'INVALID_QQ_MEDIA_PARTS');
+  }
+
+  const chunks = [];
+  let totalBytes = 0;
+  for (const fileId of ordered) {
+    const downloaded = await cloud.downloadFile({ fileID: fileId });
+    const chunk = Buffer.from(downloaded.fileContent || []);
+    if (!chunk.length || chunk.length > QQ_REVIEW_CONFIG.maxChunkBytes) {
+      return fail('云端图片分片大小无效', 'INVALID_QQ_MEDIA_PARTS');
+    }
+    totalBytes += chunk.length;
+    if (totalBytes > QQ_REVIEW_CONFIG.maxImageBytes) {
+      return fail('图片超过云端单图大小限制', 'INVALID_QQ_MEDIA');
+    }
+    chunks.push(chunk);
+  }
+
+  const fileContent = Buffer.concat(chunks);
+  if (fileContent.length !== metadata.bytes || sha256(fileContent) !== metadata.digest) {
+    return fail('图片合并校验失败', 'INVALID_QQ_MEDIA');
+  }
+  const extension = extensionForContentType(metadata.contentType);
+  const cloudPath = `qq-review/${metadata.queueId}/${metadata.digest.slice(0, 24)}.${extension}`;
+  const uploaded = await cloud.uploadFile({ cloudPath, fileContent });
+  try {
+    await cloud.deleteFile({ fileList: ordered });
+  } catch (error) {
+    console.warn('[lostfound] failed to remove QQ media staging chunks', error);
+  }
+  return ok({
+    media: {
+      fileId: uploaded.fileID || uploaded.fileId || '',
+      contentType: metadata.contentType,
+      bytes: fileContent.length,
+      sha256: metadata.digest,
+      originalFile: metadata.originalFile
+    }
+  });
+}
+
 function decodeReviewImage(media) {
   const base64 = String(media?.base64 || '').replace(/^data:[^,]+,/, '');
   if (!base64) throw new Error('图片数据为空');
@@ -665,7 +839,7 @@ function decodeReviewImage(media) {
     throw new Error('图片为空或超过云端单图大小限制');
   }
   const contentType = String(media.contentType || 'image/jpeg').toLowerCase();
-  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType)) {
+  if (!QQ_REVIEW_IMAGE_TYPES.has(contentType)) {
     throw new Error('图片格式不受支持');
   }
   if (media.sha256 && !safeEqual(String(media.sha256).toLowerCase(), sha256(fileContent))) {
@@ -703,11 +877,7 @@ async function uploadQQReviewImages(queueId, mediaList = []) {
 }
 
 async function ingestQQMessage(event) {
-  const tokenError = requireConfiguredToken(
-    QQ_REVIEW_CONFIG.ingestToken,
-    bearerToken(event),
-    '请先在云函数环境变量中配置 QQ_INGEST_TOKEN'
-  );
+  const tokenError = requireQQIngestToken(event);
   if (tokenError) return tokenError;
 
   let normalized;
@@ -732,7 +902,17 @@ async function ingestQQMessage(event) {
 
   let uploadedImages;
   try {
-    uploadedImages = await uploadQQReviewImages(queueId, event.media || []);
+    uploadedImages = normalizeQQMediaRefs(
+      queueId,
+      event.mediaRefs || [],
+      QQ_REVIEW_CONFIG.maxImageBytes
+    );
+    const remainingSlots = Math.max(0, 4 - uploadedImages.length);
+    if (remainingSlots) {
+      uploadedImages.push(
+        ...await uploadQQReviewImages(queueId, (event.media || []).slice(0, remainingSlots))
+      );
+    }
   } catch (error) {
     return fail(error.message, 'IMAGE_UPLOAD_FAILED');
   }
@@ -897,6 +1077,10 @@ exports.main = async (event = {}, runtimeContext = {}) => {
         return updateReturnStatus(request, { ...context, OPENID: callerId }, false);
       case 'reportContent':
         return reportContent(request, { ...context, OPENID: callerId });
+      case 'uploadQQMediaChunk':
+        return uploadQQMediaChunk(request);
+      case 'completeQQMediaUpload':
+        return completeQQMediaUpload(request);
       case 'ingestQQMessage':
         return ingestQQMessage(request);
       case 'listQQReviewQueue':

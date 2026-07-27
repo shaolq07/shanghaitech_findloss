@@ -48,6 +48,7 @@ export function loadConfig(env = process.env) {
     cloudGroupIds: splitCsv(env.QQ_CLOUD_GROUP_IDS || '731332881'),
     cloudRetryMs: positiveInteger(env.QQ_CLOUD_RETRY_MS, 30_000),
     cloudTimeoutMs: positiveInteger(env.QQ_CLOUD_TIMEOUT_MS, 45_000),
-    cloudMaxImageBytes: positiveInteger(env.QQ_CLOUD_MAX_IMAGE_BYTES, 8 * 1024 * 1024)
+    cloudMaxImageBytes: positiveInteger(env.QQ_CLOUD_MAX_IMAGE_BYTES, 8 * 1024 * 1024),
+    cloudUploadChunkBytes: positiveInteger(env.QQ_CLOUD_UPLOAD_CHUNK_BYTES, 48 * 1024)
   };
 }
