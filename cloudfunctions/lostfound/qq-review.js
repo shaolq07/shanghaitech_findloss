@@ -1,5 +1,11 @@
 const crypto = require('crypto');
 
+const QQ_REVIEW_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif'
+]);
 const DEFAULT_ALLOWED_GROUPS = ['731332881'];
 const CATEGORY_RULES = [
   ['校园卡', ['校园卡', '一卡通', '饭卡']],
@@ -151,10 +157,69 @@ function sanitizeDraft(input = {}, fallback = {}) {
   };
 }
 
+function cloudFileContainsPath(fileId, expectedPath) {
+  return String(fileId || '').replace(/\\/g, '/').includes(`/${expectedPath}`);
+}
+
+function normalizeQQMediaRefs(queueId, mediaRefs = [], maxImageBytes = 8 * 1024 * 1024) {
+  if (!Array.isArray(mediaRefs)) return [];
+  return mediaRefs.slice(0, 4).map((media) => {
+    const fileId = String(media?.fileId || '');
+    const contentType = String(media?.contentType || '').toLowerCase();
+    const bytes = Number(media?.bytes);
+    const digest = String(media?.sha256 || '').toLowerCase();
+    const expectedPath = `qq-review/${queueId}/${digest.slice(0, 24)}.`;
+    if (
+      !QQ_REVIEW_IMAGE_TYPES.has(contentType)
+      || !Number.isInteger(bytes)
+      || bytes < 1
+      || bytes > maxImageBytes
+      || !/^[a-f0-9]{64}$/.test(digest)
+      || !cloudFileContainsPath(fileId, expectedPath)
+    ) {
+      throw new Error('云存储图片引用无效');
+    }
+    return {
+      fileId,
+      contentType,
+      bytes,
+      sha256: digest,
+      originalFile: clampText(media.originalFile, 180)
+    };
+  });
+}
+
+function orderQQMediaParts(parts, chunkCount, uploadDirectory) {
+  const ordered = new Array(chunkCount);
+  for (const part of parts) {
+    const index = Number(part?.index);
+    const fileId = String(part?.fileId || '');
+    const expectedPath = `${uploadDirectory}/${String(index).padStart(4, '0')}.part`;
+    if (
+      !Number.isInteger(index)
+      || index < 0
+      || index >= chunkCount
+      || ordered[index]
+      || !cloudFileContainsPath(fileId, expectedPath)
+    ) {
+      throw new Error('图片分片引用无效');
+    }
+    ordered[index] = fileId;
+  }
+  if (ordered.filter(Boolean).length !== chunkCount) {
+    throw new Error('图片分片引用不完整');
+  }
+  return ordered;
+}
+
 module.exports = {
+  QQ_REVIEW_IMAGE_TYPES,
   DEFAULT_ALLOWED_GROUPS,
+  cloudFileContainsPath,
   detectRiskFlags,
+  normalizeQQMediaRefs,
   normalizeIncomingRecord,
+  orderQQMediaParts,
   parseCsv,
   reviewId,
   safeEqual,

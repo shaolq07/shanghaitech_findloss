@@ -1,5 +1,8 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+const DEFAULT_UPLOAD_CHUNK_BYTES = 48 * 1024;
 
 function contentTypeFor(filePath) {
   const extension = path.extname(filePath).toLowerCase();
@@ -14,6 +17,10 @@ function contentTypeFor(filePath) {
 
 function safeJobName(record) {
   return `${record.group_id}-${record.message_id}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function resolveArchiveFile(archiveRoot, relativePath) {
@@ -44,6 +51,9 @@ export class CloudForwarder {
   async init() {
     this.outboxDirectory = path.join(this.config.archiveRoot, 'cloud-outbox');
     await fs.mkdir(this.outboxDirectory, { recursive: true });
+    this.metrics.queued = (await fs.readdir(this.outboxDirectory))
+      .filter((name) => name.endsWith('.json'))
+      .length;
     if (this.enabled) {
       this.timer = setInterval(() => this.flush().catch(() => undefined), this.config.cloudRetryMs);
       this.timer.unref();
@@ -64,55 +74,106 @@ export class CloudForwarder {
       return { queued: false, reason: this.enabled ? '群号不在云端转发白名单中' : '云端转发未配置' };
     }
     const destination = path.join(this.outboxDirectory, `${safeJobName(record)}.json`);
-    await fs.writeFile(destination, JSON.stringify({ record, queuedAt: new Date().toISOString() }), 'utf8');
-    this.metrics.queued += 1;
+    try {
+      await fs.writeFile(
+        destination,
+        JSON.stringify({ record, queuedAt: new Date().toISOString() }),
+        { encoding: 'utf8', flag: 'wx' }
+      );
+      this.metrics.queued += 1;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
     this.flush().catch(() => undefined);
     return { queued: true };
   }
 
-  async buildMedia(record) {
-    const media = [];
-    for (const image of (record.images || []).slice(0, 4)) {
+  async request(payload) {
+    const response = await this.fetch(this.config.cloudIngestUrl, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.config.cloudIngestToken}`,
+        'content-type': 'application/json',
+        'user-agent': 'lockmyitem-qq-archive/0.3'
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(this.config.cloudTimeoutMs)
+    });
+    const body = await response.json().catch(() => ({}));
+    const envelope = body?.result || body;
+    if (!response.ok || envelope?.ok !== true) {
+      throw new Error(
+        envelope?.message
+        || body?.message
+        || `${envelope?.code || 'CLOUD_ERROR'} (${response.status})`
+      );
+    }
+    return envelope.data || {};
+  }
+
+  async uploadMedia(record) {
+    const mediaRefs = [];
+    const configuredChunkBytes = Number(this.config.cloudUploadChunkBytes);
+    const chunkBytes = Number.isFinite(configuredChunkBytes) && configuredChunkBytes > 0
+      ? Math.min(configuredChunkBytes, 64 * 1024)
+      : DEFAULT_UPLOAD_CHUNK_BYTES;
+
+    for (const [mediaIndex, image] of (record.images || []).slice(0, 4).entries()) {
       if (!image.relative_path) continue;
       const absolutePath = resolveArchiveFile(this.config.archiveRoot, image.relative_path);
       const file = await fs.readFile(absolutePath);
       if (file.length > this.config.cloudMaxImageBytes) {
         throw new Error(`图片超过云端转发限制：${image.original_file || image.relative_path}`);
       }
-      media.push({
+      const digest = sha256(file);
+      if (image.sha256 && image.sha256.toLowerCase() !== digest) {
+        throw new Error(`图片校验失败：${image.original_file || image.relative_path}`);
+      }
+      const metadata = {
+        groupId: String(record.group_id),
+        messageId: String(record.message_id),
+        mediaIndex,
         originalFile: image.original_file || path.basename(absolutePath),
         contentType: contentTypeFor(absolutePath),
         bytes: file.length,
-        sha256: image.sha256 || '',
-        base64: file.toString('base64')
+        sha256: digest
+      };
+      const chunkCount = Math.ceil(file.length / chunkBytes);
+      const parts = [];
+      for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+        const start = chunkIndex * chunkBytes;
+        const chunk = file.subarray(start, Math.min(start + chunkBytes, file.length));
+        const uploaded = await this.request({
+          action: 'uploadQQMediaChunk',
+          ...metadata,
+          chunkIndex,
+          chunkCount,
+          chunkBase64: chunk.toString('base64')
+        });
+        if (!uploaded.fileId) throw new Error('Cloud media chunk upload returned no fileId');
+        parts.push({ index: chunkIndex, fileId: uploaded.fileId });
+      }
+      const completed = await this.request({
+        action: 'completeQQMediaUpload',
+        ...metadata,
+        chunkCount,
+        parts
       });
+      if (!completed.media?.fileId) {
+        throw new Error('Cloud media upload completion returned no controlled file reference');
+      }
+      mediaRefs.push(completed.media);
     }
-    return media;
+    return mediaRefs;
   }
 
   async send(job) {
-    const media = await this.buildMedia(job.record);
-    const response = await this.fetch(this.config.cloudIngestUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${this.config.cloudIngestToken}`,
-        'content-type': 'application/json',
-        'user-agent': 'lockmyitem-qq-archive/0.2'
-      },
-      body: JSON.stringify({
-        action: 'ingestQQMessage',
-        record: job.record,
-        media
-      }),
-      signal: AbortSignal.timeout(this.config.cloudTimeoutMs)
+    const mediaRefs = await this.uploadMedia(job.record);
+    return this.request({
+      action: 'ingestQQMessage',
+      record: job.record,
+      mediaRefs
     });
-    const body = await response.json().catch(() => ({}));
-    const result = body?.data || body?.result?.data || body?.result || body;
-    const requestOk = response.ok && (body.ok === true || body?.result?.ok === true);
-    if (!requestOk) {
-      throw new Error(result?.message || body?.message || `云端接口返回 ${response.status}`);
-    }
-    return result;
   }
 
   flush() {
@@ -129,6 +190,7 @@ export class CloudForwarder {
       .filter((name) => name.endsWith('.json'))
       .sort();
     let sent = 0;
+    let lastFailure = null;
     for (const fileName of files) {
       const filePath = path.join(this.outboxDirectory, fileName);
       try {
@@ -137,15 +199,15 @@ export class CloudForwarder {
         await fs.unlink(filePath);
         sent += 1;
         this.metrics.sent += 1;
+        this.metrics.queued = Math.max(0, this.metrics.queued - 1);
         this.metrics.last_sent_at = new Date().toISOString();
-        this.metrics.last_error = '';
       } catch (error) {
         this.metrics.failed += 1;
-        this.metrics.last_error = error.message;
-        break;
+        lastFailure = error;
       }
     }
-    return { sent };
+    this.metrics.last_error = lastFailure?.message || '';
+    return { sent, failed: Boolean(lastFailure), queued: this.metrics.queued };
   }
 
   stop() {

@@ -3,6 +3,8 @@ const test = require('node:test');
 const {
   detectRiskFlags,
   normalizeIncomingRecord,
+  normalizeQQMediaRefs,
+  orderQQMediaParts,
   parseCsv,
   reviewId,
   sanitizeDraft
@@ -52,4 +54,39 @@ test('moderator draft is bounded and type constrained', () => {
   assert.equal(draft.type, 'lost');
   assert.equal(draft.title.length, 80);
   assert.deepEqual(draft.tags, ['电子产品', '鼠标']);
+});
+
+test('cloud media references are restricted to the deterministic review path', () => {
+  const digest = 'a'.repeat(64);
+  const valid = normalizeQQMediaRefs('qq_test', [{
+    fileId: `cloud://env.bucket/qq-review/qq_test/${digest.slice(0, 24)}.jpg`,
+    contentType: 'image/jpeg',
+    bytes: 233_797,
+    sha256: digest,
+    originalFile: 'test.jpg'
+  }]);
+  assert.equal(valid.length, 1);
+  assert.equal(valid[0].bytes, 233_797);
+  assert.throws(() => normalizeQQMediaRefs('qq_test', [{
+    ...valid[0],
+    fileId: `cloud://env.bucket/other/${digest.slice(0, 24)}.jpg`
+  }]));
+});
+
+test('cloud media chunks must be complete, unique and path-bound', () => {
+  const directory = 'qq-review-staging/qq_test/0-aaaaaaaaaaaaaaaaaaaaaaaa';
+  const part = (index) => ({
+    index,
+    fileId: `cloud://env.bucket/${directory}/${String(index).padStart(4, '0')}.part`
+  });
+  assert.deepEqual(
+    orderQQMediaParts([part(1), part(0)], 2, directory),
+    [part(0).fileId, part(1).fileId]
+  );
+  assert.throws(() => orderQQMediaParts([part(0)], 2, directory));
+  assert.throws(() => orderQQMediaParts([part(0), part(0)], 2, directory));
+  assert.throws(() => orderQQMediaParts([
+    part(0),
+    { index: 1, fileId: 'cloud://env.bucket/other/0001.part' }
+  ], 2, directory));
 });
