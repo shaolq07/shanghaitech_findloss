@@ -42,7 +42,10 @@ function App() {
         const data = await callLostfound('listItems', {
           filters: { status: 'active', limit: 50 }
         });
-        const fileIds = (data.items || []).flatMap((item) => item.imageUrls || []);
+        const fileIds = (data.items || []).flatMap((item) => [
+          ...(item.imageFileIds || []),
+          ...(item.imageUrls || []).filter((url) => /^cloud:\/\//i.test(url))
+        ]);
         const imageUrls = await resolveCloudFileUrls(fileIds);
         const cloudItems = (data.items || []).map((item) => mapCloudItem(item, imageUrls));
         if (cancelled) return;
@@ -1171,7 +1174,11 @@ function cloudDate(value) {
 }
 
 function mapCloudItem(item, resolvedUrls) {
-  const images = (item.imageUrls || [])
+  const imageSources = Array.from(new Set([
+    ...(item.imageFileIds || []),
+    ...(item.imageUrls || [])
+  ].filter(Boolean)));
+  const images = imageSources
     .map((fileId) => resolvedUrls[fileId] || (/^https:\/\//i.test(fileId) ? fileId : ''))
     .filter(Boolean);
   return {

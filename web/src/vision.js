@@ -77,7 +77,7 @@ async function classifyViaCloudbase(dataUrl, hint) {
     imageBase64: compressed.replace(/^data:[^,]+,/, ''),
     mimeType: 'image/jpeg',
     hint
-  });
+  }, 55000);
   return normalizeRemoteData(data);
 }
 
