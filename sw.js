@@ -1,6 +1,4 @@
-// Bump this whenever the deployed app shell changes. Hashed Vite assets are
-// replaced between releases, so an old shell must not survive indefinitely.
-const CACHE_NAME = 'shanghaitech-lostfound-v5-app-shell';
+const CACHE_NAME = 'shanghaitech-lostfound-v4-qq-import';
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (event) => {
