@@ -1,3 +1,5 @@
+import cloudbase from '@cloudbase/js-sdk';
+
 const TCB_ENV_ID = import.meta.env.VITE_CLOUDBASE_ENV_ID || import.meta.env.VITE_TCB_ENV_ID || 'cloud1-d9gnyuxf5b44b6b92';
 const TCB_ACCESS_KEY = import.meta.env.VITE_CLOUDBASE_ACCESS_KEY || import.meta.env.VITE_TCB_ACCESS_KEY || '';
 const TCB_REGION = import.meta.env.VITE_CLOUDBASE_REGION || import.meta.env.VITE_TCB_REGION || 'ap-shanghai';
@@ -97,7 +99,6 @@ export async function getCloudbaseApp() {
 
   if (!cloudbaseAppPromise) {
     cloudbaseAppPromise = Promise.resolve().then(async () => {
-      const { default: cloudbase } = await import('@cloudbase/js-sdk');
       const config = {
         env: TCB_ENV_ID,
         region: TCB_REGION
