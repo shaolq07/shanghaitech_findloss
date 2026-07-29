@@ -26,6 +26,21 @@ function parseMaybeJson(value) {
   }
 }
 
+function unwrapCloudFunctionResponse(response) {
+  const queue = [response?.result, response?.data, response];
+  const seen = new Set();
+
+  while (queue.length) {
+    const parsed = parseMaybeJson(queue.shift());
+    if (!parsed || typeof parsed !== 'object' || seen.has(parsed)) continue;
+    seen.add(parsed);
+    if ('ok' in parsed || 'code' in parsed) return parsed;
+    queue.push(parsed.result, parsed.data, parsed.body);
+  }
+
+  return {};
+}
+
 export function readableCloudError(error, fallback = '调用失败') {
   const parts = [
     error?.message,
@@ -115,7 +130,7 @@ export async function callLostfound(action, data = {}, timeoutMs = 30000) {
     `云函数 ${action} 调用超时`
   );
 
-  const body = parseMaybeJson(response?.result) || {};
+  const body = unwrapCloudFunctionResponse(response);
   if (!body.ok) {
     const error = new Error(body.message || body.error || `云函数 ${action} 返回失败`);
     error.code = body.code || 'CLOUD_ERROR';

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "envId": "cloud1-d9gnyuxf5b44b6b92",
+  "functionRoot": "cloudfunctions",
+  "functions": [
+    {
+      "name": "lostfound",
+      "runtime": "Nodejs20.19",
+      "handler": "index.main",
+      "timeout": 60,
+      "memorySize": 512
+    }
+  ]
+}

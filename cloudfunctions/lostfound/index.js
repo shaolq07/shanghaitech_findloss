@@ -112,6 +112,13 @@ function clampInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, number));
 }
 
+const ITEM_IMAGE_MAX_BYTES = clampInteger(
+  process.env.ITEM_IMAGE_MAX_BYTES,
+  4 * 1024 * 1024,
+  1,
+  10 * 1024 * 1024
+);
+
 function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -231,6 +238,120 @@ function normalizeImageUrl(imageUrl = '') {
     // Keep the original value so callers still get a helpful model/provider error.
   }
   return value;
+}
+
+function isDataImageUrl(value = '') {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(value || ''));
+}
+
+function isCloudFileId(value = '') {
+  return /^cloud:\/\//i.test(String(value || '').trim());
+}
+
+function isHttpUrl(value = '') {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function extensionForItemImage(contentType = '') {
+  return {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  }[String(contentType).toLowerCase()] || '';
+}
+
+function parseDataImageUrl(dataUrl = '') {
+  const match = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/]+={0,2})$/);
+  if (!match) throw new Error('图片编码无效');
+  const mimeType = match[1].toLowerCase();
+  const extension = extensionForItemImage(mimeType);
+  if (!extension) throw new Error('图片格式不受支持');
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length) throw new Error('图片内容为空');
+  if (buffer.length > ITEM_IMAGE_MAX_BYTES) {
+    throw new Error('图片过大，请压缩后再发布');
+  }
+  return { buffer, extension };
+}
+
+async function uploadItemDataImage(dataUrl, actorId = '') {
+  const { buffer, extension } = parseDataImageUrl(dataUrl);
+  const safeActorId = sha256(actorId || 'anonymous').slice(0, 16);
+  const digest = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 32);
+  const cloudPath = `lostfound/items/${safeActorId}/${Date.now()}-${digest}.${extension}`;
+  const result = await cloud.uploadFile({ cloudPath, fileContent: buffer });
+  return result.fileID || result.fileId || '';
+}
+
+async function prepareItemImages(imageUrls = [], actorId = '') {
+  const imageFileIds = [];
+  const publicImageUrls = [];
+  const sources = unique(imageUrls).slice(0, 6);
+
+  for (const source of sources) {
+    const value = String(source || '').trim();
+    if (!value) continue;
+    if (isDataImageUrl(value)) {
+      const fileId = await uploadItemDataImage(value, actorId);
+      if (fileId) imageFileIds.push(fileId);
+    } else if (isCloudFileId(value)) {
+      imageFileIds.push(value);
+    } else if (isHttpUrl(value)) {
+      publicImageUrls.push(value);
+    }
+  }
+
+  return {
+    imageFileIds: unique(imageFileIds),
+    imageUrls: unique(publicImageUrls)
+  };
+}
+
+async function resolveTempFileUrlMap(fileIds = []) {
+  const ids = unique(fileIds).filter(isCloudFileId);
+  if (!ids.length) return {};
+  const map = {};
+
+  try {
+    for (let index = 0; index < ids.length; index += 50) {
+      const result = await cloud.getTempFileURL({ fileList: ids.slice(index, index + 50) });
+      (result.fileList || []).forEach((file) => {
+        const fileId = file.fileID || file.fileId;
+        const url = file.tempFileURL || file.download_url;
+        if (fileId && url) map[fileId] = url;
+      });
+    }
+  } catch (error) {
+    console.warn('[lostfound] failed to resolve CloudBase image URLs', error);
+  }
+
+  return map;
+}
+
+async function hydrateItemImages(items = []) {
+  const list = Array.isArray(items) ? items : [items];
+  const allFileIds = list.flatMap((item) => [
+    ...(item.imageFileIds || []),
+    ...(item.imageUrls || []).filter(isCloudFileId)
+  ]);
+  const tempUrlMap = await resolveTempFileUrlMap(allFileIds);
+
+  return list.map((item) => {
+    const imageFileIds = unique([
+      ...(item.imageFileIds || []),
+      ...(item.imageUrls || []).filter(isCloudFileId)
+    ]);
+    const temporaryUrls = imageFileIds.map((fileId) => tempUrlMap[fileId]).filter(Boolean);
+    const publicUrls = (item.imageUrls || []).filter(isHttpUrl);
+    const imageUrls = unique([...temporaryUrls, ...publicUrls]);
+    return {
+      ...item,
+      imageFileIds,
+      imageUrls,
+      thumbUrl: imageUrls[0] || ''
+    };
+  });
 }
 
 function sha256(value, encoding = 'hex') {
@@ -512,7 +633,10 @@ async function classifyImage(event, callerId) {
 
 async function createItem(event, context) {
   const payload = event.payload || {};
-  if (!(payload.imageUrls || []).length && !payload.category) return fail('请上传图片或选择分类');
+  const preparedImages = await prepareItemImages(payload.imageUrls || [], context.OPENID);
+  if (!preparedImages.imageFileIds.length && !preparedImages.imageUrls.length && !payload.category) {
+    return fail('请上传图片或选择分类');
+  }
   if (String(payload.title || '').length > 80) return fail('物品标题不能超过 80 个字符');
   if (String(payload.description || '').length > 1000) return fail('物品描述不能超过 1000 个字符');
   let location = null;
@@ -538,8 +662,9 @@ async function createItem(event, context) {
     description: payload.description || '',
     category: classification.category,
     aiTags: classification.aiTags,
-    imageUrls: payload.imageUrls || [],
-    thumbUrl: (payload.imageUrls || [])[0] || '',
+    imageFileIds: preparedImages.imageFileIds,
+    imageUrls: preparedImages.imageUrls,
+    thumbUrl: preparedImages.imageUrls[0] || '',
     visualDescription: payload.visualDescription || '',
     yoloObjects: payload.yoloObjects || [],
     semanticTags: payload.semanticTags || [],
@@ -563,7 +688,8 @@ async function createItem(event, context) {
     updatedAt: now()
   };
   const created = await db.collection(COLLECTIONS.items).add({ data });
-  return ok(toPublicRecord({ _id: created._id, ...data }, context.OPENID));
+  const [hydrated] = await hydrateItemImages([{ _id: created._id, ...data }]);
+  return ok(toPublicRecord(hydrated, context.OPENID));
 }
 
 async function listItems(event) {
@@ -585,22 +711,24 @@ async function listItems(event) {
     .skip(cursor)
     .limit(limit)
     .get();
+  const hydrated = await hydrateItemImages(result.data);
   const callerId = event.__callerId || '';
   return ok({
-    items: result.data.map((item) => toPublicRecord(item, callerId)),
+    items: hydrated.map((item) => toPublicRecord(item, callerId)),
     nextCursor: cursor + result.data.length
   });
 }
 
 async function getItemDetail(event) {
   const item = await db.collection(COLLECTIONS.items).doc(event.itemId).get();
+  const [hydratedItem] = await hydrateItemImages([item.data]);
   const comments = await db.collection(COLLECTIONS.comments)
     .where({ itemId: event.itemId, status: 'active' })
     .orderBy('createdAt', 'asc')
     .get();
   const callerId = event.__callerId || '';
   return ok({
-    item: toPublicRecord(item.data, callerId),
+    item: toPublicRecord(hydratedItem, callerId),
     comments: comments.data.map((comment) => toPublicRecord(comment, callerId))
   });
 }
@@ -990,15 +1118,16 @@ async function reviewQQItem(event) {
   }
 
   const draft = sanitizeDraft(event.draft || {}, review.draft || {});
-  const imageUrls = (review.images || []).map((image) => image.fileId).filter(Boolean);
+  const imageFileIds = (review.images || []).map((image) => image.fileId).filter(Boolean);
   const itemData = {
     type: draft.type,
     title: draft.title,
     description: draft.description,
     category: draft.category,
     aiTags: draft.tags,
-    imageUrls,
-    thumbUrl: imageUrls[0] || '',
+    imageFileIds,
+    imageUrls: [],
+    thumbUrl: '',
     visualDescription: '',
     yoloObjects: [],
     semanticTags: draft.tags,
