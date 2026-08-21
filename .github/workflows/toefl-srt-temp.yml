@@ -1,0 +1,242 @@
+name: Temporary TOEFL subtitle transcription
+
+on:
+  push:
+    branches:
+      - temp/toefl-srt-20260821
+    paths:
+      - .github/workflows/toefl-srt-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      BRANCH_NAME: temp/toefl-srt-20260821
+      OUTPUT_PUBLIC_KEY_B64: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUExV3hidHhKZHNUcVlqc215aGEwKwpFYllZYm1nOFJIUjFic0lFeTAvZlkrRzh5cVZOWGh3NEFLd2JjTW1HSXh6bVFScWVaRXEyRzVmZm05SE9SL3h4Cjd2NW1tZ3hhZkIyWVF1eUZmR2JXR3psNDkzS3NlajhJQzhHVHJ0ODV5T0hVREtJZms3a3FCVUNQTjFkb0J1YXQKT1hTNjRVdG1wbW5vSWF1bjRCNE1WMmYvTmZJN0hoSVF6NzcyS2IwMG5TL0xLcEdZanFDV21LOXVla2FIbWVoSwpEUjhieDJqd08wQWlteDlIZ3dIVjI5WXRsTXJBWXZhUDJQaGZ0VFVyRHk4SksrWXFqUk1MRGhicFloeHYvYTNFCjZzYXdpdFJmRDRKT2FlL1J0dmQ1N0xRYks5L285eFRCL2ZGRlZLUUo1Z2ZCRzNyQjhPSzRHeEFubEFVWGIzeWIKdUZseTdBZ3p5dzNGc1YwRytSNmhiL3Q2VExCRkt2cDRSSE5CYnRNbnltRVJIU3cwaU1JckIyRjJnY3MrclFubAo2MURXcWxjRkJubE1aZE5YZVZVWHRxVFhCUHFTSVJqL2M1aTJ1YlVuT04walpBQXVEcm9lazcyNXpTNXRQZXJUCnNudXpIRzFhUzBBMmUraVdFdlZuRm02aUNDeTE0QlhqSk1POFg2dTAzV3hSQWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
+
+    steps:
+      - name: Check out temporary branch
+        uses: actions/checkout@v4
+        with:
+          ref: temp/toefl-srt-20260821
+
+      - name: Generate one-time input key and wait for encrypted URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci_runtime
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out .ci_runtime/input_private.pem >/dev/null 2>&1
+          openssl pkey -in .ci_runtime/input_private.pem -pubout -out .ci_runtime/input_public.pem >/dev/null 2>&1
+          echo "INPUT_PUBLIC_KEY_B64=$(base64 -w0 .ci_runtime/input_public.pem)"
+
+          payload_url="https://raw.githubusercontent.com/shaolq07/shanghaitech_findloss/${BRANCH_NAME}/.ci-temp/payload.txt"
+          found=0
+          for i in $(seq 1 360); do
+            if curl -fsSL --no-progress-meter "${payload_url}?cachebust=$(date +%s%N)" -o .ci_runtime/payload.txt 2>/dev/null; then
+              lines=$(grep -cve '^$' .ci_runtime/payload.txt || true)
+              if [ "$lines" -ge 5 ]; then
+                found=1
+                break
+              fi
+            fi
+            sleep 5
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "Encrypted URL payload was not received." >&2
+            exit 1
+          fi
+
+          : > .ci_runtime/urls.txt
+          head -n 5 .ci_runtime/payload.txt | while IFS= read -r line; do
+            printf '%s' "$line" | base64 -d > .ci_runtime/url.bin
+            openssl pkeyutl -decrypt \
+              -inkey .ci_runtime/input_private.pem \
+              -in .ci_runtime/url.bin \
+              -pkeyopt rsa_padding_mode:oaep \
+              -pkeyopt rsa_oaep_md:sha256 \
+              -pkeyopt rsa_mgf1_md:sha256 >> .ci_runtime/urls.txt
+            printf '\n' >> .ci_runtime/urls.txt
+          done
+          test "$(wc -l < .ci_runtime/urls.txt)" -eq 5
+
+      - name: Download source videos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p media
+          n=0
+          while IFS= read -r url; do
+            n=$((n+1))
+            curl -fL --retry 5 --retry-delay 3 --no-progress-meter -o "media/lesson_${n}.mp4" "$url"
+            test -s "media/lesson_${n}.mp4"
+          done < .ci_runtime/urls.txt
+          ls -lh media | sed -E 's/[0-9]+\.[0-9]+[KMG]/SIZE/g'
+
+      - name: Install transcription engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install faster-whisper
+
+      - name: Transcribe five lectures to SRT
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .ci_runtime/transcribe.py <<'PY'
+          from concurrent.futures import ProcessPoolExecutor, as_completed
+          from pathlib import Path
+          import os
+          import re
+          
+          MODEL_NAME = "small"
+          CACHE_DIR = str(Path(".ci_runtime/fw_model").resolve())
+          LABELS = ["第1讲", "第2讲", "第3讲", "第32讲", "第33讲"]
+          PROMPT = "这是一节托福 TOEFL 强化课程。讲解以中文为主，夹杂大量英文单词、英文句子、阅读材料和听力内容。准确保留中英文原话、英文术语、专有名词和题目表述。"
+          
+          def ts(sec: float) -> str:
+              ms = max(0, int(round(sec * 1000)))
+              h, rem = divmod(ms, 3600000)
+              m, rem = divmod(rem, 60000)
+              s, ms = divmod(rem, 1000)
+              return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+          
+          def transcribe_one(i: int):
+              from faster_whisper import WhisperModel
+              src = Path(f"media/lesson_{i+1}.mp4")
+              outdir = Path("output")
+              outdir.mkdir(exist_ok=True)
+              out = outdir / f"TOEFL强化班_{LABELS[i]}.srt"
+              model = WhisperModel(
+                  MODEL_NAME,
+                  device="cpu",
+                  compute_type="int8",
+                  cpu_threads=1,
+                  num_workers=1,
+                  download_root=CACHE_DIR,
+                  local_files_only=True,
+              )
+              segments, info = model.transcribe(
+                  str(src),
+                  language="zh",
+                  task="transcribe",
+                  beam_size=3,
+                  best_of=3,
+                  temperature=0.0,
+                  vad_filter=True,
+                  vad_parameters={"min_silence_duration_ms": 450},
+                  condition_on_previous_text=True,
+                  initial_prompt=PROMPT,
+                  word_timestamps=False,
+              )
+              count = 0
+              last_end = 0.0
+              with out.open("w", encoding="utf-8", newline="\n") as f:
+                  for seg in segments:
+                      text = re.sub(r"\s+", " ", seg.text).strip()
+                      if not text:
+                          continue
+                      start = max(float(seg.start), last_end if float(seg.start) < last_end - 0.25 else float(seg.start))
+                      end = max(float(seg.end), start + 0.05)
+                      count += 1
+                      f.write(f"{count}\n{ts(start)} --> {ts(end)}\n{text}\n\n")
+                      last_end = end
+              return i, str(out), count, getattr(info, "language", None), getattr(info, "language_probability", None)
+          
+          def main():
+              # Download the model once before child processes start so they share the cache.
+              from faster_whisper import WhisperModel
+              model = WhisperModel(
+                  MODEL_NAME,
+                  device="cpu",
+                  compute_type="int8",
+                  cpu_threads=2,
+                  num_workers=1,
+                  download_root=CACHE_DIR,
+              )
+              del model
+              workers = min(4, os.cpu_count() or 2, 5)
+              results = []
+              with ProcessPoolExecutor(max_workers=workers) as ex:
+                  futs = [ex.submit(transcribe_one, i) for i in range(5)]
+                  for fut in as_completed(futs):
+                      r = fut.result()
+                      results.append(r)
+                      print(f"DONE lesson_index={r[0]+1} segments={r[2]} language={r[3]} prob={r[4]}", flush=True)
+              if len(results) != 5:
+                  raise RuntimeError("Not all lectures completed")
+          
+          if __name__ == "__main__":
+              main()
+          PY
+          python .ci_runtime/transcribe.py
+
+      - name: Validate subtitle time axes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          files = sorted(Path('output').glob('*.srt'))
+          assert len(files) == 5, files
+          tc = re.compile(r'^(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})$')
+          for p in files:
+              text = p.read_text(encoding='utf-8').strip()
+              assert text, p
+              blocks = re.split(r'\n\s*\n', text)
+              assert len(blocks) >= 20, (p, len(blocks))
+              prev = -1
+              for idx, b in enumerate(blocks, 1):
+                  lines = b.splitlines()
+                  assert lines[0].strip() == str(idx), (p, idx, lines[:2])
+                  m = tc.match(lines[1].strip())
+                  assert m, (p, idx, lines[1])
+                  vals = list(map(int, m.groups()))
+                  start = ((vals[0]*60+vals[1])*60+vals[2])*1000+vals[3]
+                  end = ((vals[4]*60+vals[5])*60+vals[6])*1000+vals[7]
+                  assert end > start >= 0, (p, idx)
+                  assert start >= prev - 500, (p, idx, start, prev)
+                  prev = end
+              print(p.name, len(blocks), 'blocks', 'OK')
+          PY
+
+      - name: Encrypt subtitle archive for return
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-result .ci_runtime/package
+          cp output/*.srt .ci_runtime/package/
+          (cd .ci_runtime/package && zip -q ../TOEFL_subtitles.zip ./*.srt)
+          printf '%s' "$OUTPUT_PUBLIC_KEY_B64" | base64 -d > .ci_runtime/output_public.pem
+          openssl rand 32 > .ci_runtime/aes.key
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -in .ci_runtime/TOEFL_subtitles.zip \
+            -out .ci_runtime/TOEFL_subtitles.zip.enc \
+            -pass file:.ci_runtime/aes.key
+          openssl pkeyutl -encrypt \
+            -pubin -inkey .ci_runtime/output_public.pem \
+            -in .ci_runtime/aes.key \
+            -out .ci_runtime/aes.key.enc \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256
+          base64 -w0 .ci_runtime/TOEFL_subtitles.zip.enc > .ci-result/subtitles.enc.b64
+          base64 -w0 .ci_runtime/aes.key.enc > .ci-result/key.enc.b64
+          printf '%s\n' 'AES-256-CBC PBKDF2-200000; RSA-OAEP-SHA256 sealed key' > .ci-result/README.txt
+
+      - name: Push encrypted result to temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'temporary-transcription-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git fetch origin "$BRANCH_NAME"
+          git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          git add .ci-result
+          git commit -m 'Temporary encrypted TOEFL subtitle result'
+          git push origin "HEAD:$BRANCH_NAME"
