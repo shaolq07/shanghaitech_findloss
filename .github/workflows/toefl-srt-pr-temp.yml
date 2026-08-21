@@ -1,0 +1,103 @@
+name: Temporary TOEFL subtitle transcription PR
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/toefl-srt-pr-temp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      BRANCH_NAME: temp/toefl-srt-20260821
+      OUTPUT_PUBLIC_KEY_B64: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUExV3hidHhKZHNUcVlqc215aGEwKwpFYllZYm1nOFJIUjFic0lFeTAvZlkrRzh5cVZOWGh3NEFLd2JjTW1HSXh6bVFScWVaRXEyRzVmZm05SE9SL3h4Cjd2NW1tZ3hhZkIyWVF1eUZmR2JXR3psNDkzS3NlajhJQzhHVHJ0ODV5T0hVREtJZms3a3FCVUNQTjFkb0J1YXQKT1hTNjRVdG1wbW5vSWF1bjRCNE1WMmYvTmZJN0hoSVF6NzcyS2IwMG5TL0xLcEdZanFDV21LOXVla2FIbWVoSwpEUjhieDJqd08wQWlteDlIZ3dIVjI5WXRsTXJBWXZhUDJQaGZ0VFVyRHk4SksrWXFqUk1MRGhicFloeHYvYTNFCjZzYXdpdFJmRDRKT2FlL1J0dmQ1N0xRYks5L285eFRCL2ZGRlZLUUo1Z2ZCRzNyQjhPSzRHeEFubEFVWGIzeWIKdUZseTdBZ3p5dzNGc1YwRytSNmhiL3Q2VExCRkt2cDRSSE5CYnRNbnltRVJIU3cwaU1JckIyRjJnY3MrclFubAo2MURXcWxjRkJubE1aZE5YZVZVWHRxVFhCUHFTSVJqL2M1aTJ1YlVuT04walpBQXVEcm9lazcyNXpTNXRQZXJUCnNudXpIRzFhUzBBMmUraVdFdlZuRm02aUNDeTE0QlhqSk1POFg2dTAzV3hSQWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
+
+    steps:
+      - name: Check out temporary branch
+        uses: actions/checkout@v4
+        with:
+          ref: temp/toefl-srt-20260821
+
+      - name: Generate one-time input key and wait for encrypted URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci_runtime
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out .ci_runtime/input_private.pem >/dev/null 2>&1
+          openssl pkey -in .ci_runtime/input_private.pem -pubout -out .ci_runtime/input_public.pem >/dev/null 2>&1
+          echo "INPUT_PUBLIC_KEY_B64=$(base64 -w0 .ci_runtime/input_public.pem)"
+          payload_url="https://raw.githubusercontent.com/shaolq07/shanghaitech_findloss/${BRANCH_NAME}/.ci-temp/payload-pr.txt"
+          found=0
+          for i in $(seq 1 360); do
+            if curl -fsSL --no-progress-meter "${payload_url}?cachebust=$(date +%s%N)" -o .ci_runtime/payload.txt 2>/dev/null; then
+              lines=$(grep -cve '^$' .ci_runtime/payload.txt || true)
+              if [ "$lines" -ge 5 ]; then found=1; break; fi
+            fi
+            sleep 5
+          done
+          if [ "$found" -ne 1 ]; then echo "Encrypted URL payload was not received." >&2; exit 1; fi
+          : > .ci_runtime/urls.txt
+          head -n 5 .ci_runtime/payload.txt | while IFS= read -r line; do
+            printf '%s' "$line" | base64 -d > .ci_runtime/url.bin
+            openssl pkeyutl -decrypt -inkey .ci_runtime/input_private.pem -in .ci_runtime/url.bin \
+              -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 >> .ci_runtime/urls.txt
+            printf '\n' >> .ci_runtime/urls.txt
+          done
+          test "$(wc -l < .ci_runtime/urls.txt)" -eq 5
+
+      - name: Download source videos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p media
+          n=0
+          while IFS= read -r url; do
+            n=$((n+1))
+            curl -fL --retry 5 --retry-delay 3 --no-progress-meter -o "media/lesson_${n}.mp4" "$url"
+            test -s "media/lesson_${n}.mp4"
+          done < .ci_runtime/urls.txt
+
+      - name: Install and run Whisper transcription
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install faster-whisper
+          python .ci-temp/transcribe_ci.py
+
+      - name: Encrypt subtitle archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-result .ci_runtime/package
+          cp output/*.srt .ci_runtime/package/
+          (cd .ci_runtime/package && zip -q ../TOEFL_subtitles.zip ./*.srt)
+          printf '%s' "$OUTPUT_PUBLIC_KEY_B64" | base64 -d > .ci_runtime/output_public.pem
+          openssl rand 32 > .ci_runtime/aes.key
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -in .ci_runtime/TOEFL_subtitles.zip -out .ci_runtime/TOEFL_subtitles.zip.enc \
+            -pass file:.ci_runtime/aes.key
+          openssl pkeyutl -encrypt -pubin -inkey .ci_runtime/output_public.pem \
+            -in .ci_runtime/aes.key -out .ci_runtime/aes.key.enc \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256
+          base64 -w0 .ci_runtime/TOEFL_subtitles.zip.enc > .ci-result/subtitles.enc.b64
+          base64 -w0 .ci_runtime/aes.key.enc > .ci-result/key.enc.b64
+          printf '%s\n' 'AES-256-CBC PBKDF2-200000; RSA-OAEP-SHA256 sealed key' > .ci-result/README.txt
+
+      - name: Push encrypted result to temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'temporary-transcription-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git fetch origin "$BRANCH_NAME"
+          git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          git add .ci-result
+          git commit -m 'Temporary encrypted TOEFL subtitle result'
+          git push origin "HEAD:$BRANCH_NAME"
